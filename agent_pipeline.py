@@ -1,11 +1,5 @@
 # -*- coding: utf-8 -*-
 """
-Spyder Editor
-
-This is a temporary script file.
-"""
-
-"""
 LangGraph-based SOP to Executable Code Converter
 Uses multi-agent system with state graph for workflow conversion
 
@@ -14,117 +8,24 @@ Architecture:
 - SchemaAgent: Identifies input parameters needed
 - CodeGeneratorAgent: Generates executable Python code
 - ValidatorAgent: Validates and refines generated code
+- Orchestrator: Orchestrates
 """
 
-import os
+
 import json
-from typing import TypedDict, Annotated, List, Dict, Any, Literal
+from typing import List, Dict, Any, Literal
 from langgraph.graph import StateGraph, END
-from langchain_anthropic import ChatAnthropic
+#from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 from tools_helper import format_tools_for_llm
 from client import ClientSingleton
 from langgraph.checkpoint.memory import MemorySaver
+from planner_agent import PlannerAgent
+from sop_state import SOPConverterState
+import logging
+logger = logging.getLogger(__name__)
 
 memory = MemorySaver()
-
-# ============================================================================
-# STATE DEFINITION
-# ============================================================================
-
-class SOPConverterState(TypedDict):
-    """State passed between agents in the graph"""
-    sop: str                          # Input SOP text
-    tools: List[Dict[str, Any]]       # Available tools
-    tools_formatted: str              # Formatted tools for LLM
-    api_plan: List[Dict[str, Any]]    # Planned API calls
-    input_schema: List[Dict[str, Any]] # Required input parameters
-    generated_code: str               # Generated Python code
-    validation_result: Dict[str, Any] # Validation feedback
-    final_code: str                   # Final validated code
-    error: str                        # Error messages if any
-
-   # Control flow
-    retry_count: int
-    max_retries: int
-    error: str
-    status: str  # "planning", "generating", "validating", "complete", "failed"
-
-# ============================================================================
-# AGENT 1: PLANNER AGENT
-# ============================================================================
-
-class PlannerAgent:
-    """
-    Agent responsible for analyzing SOP and creating API execution plan
-    """
-    
-    def __call__(self, state: SOPConverterState) -> SOPConverterState:
-        """
-        Analyze SOP and create API plan
-        """
-        print("\n" + "=" * 80)
-        print("🤖 PLANNER AGENT: Analyzing SOP...")
-        print("=" * 80)
-        
-        prompt = f"""You are a workflow planning expert. Analyze this SOP and create an execution plan.
-
-SOP:
-{state['sop']}
-
-Available Tools:
-{state['tools_formatted']}
-
-Create a step-by-step API execution plan. For each step:
-1. Identify the task description
-2. Match it to the appropriate tool
-3. Determine the logical sequence
-
-Return a JSON array:
-[
-  {{
-    "step": 1,
-    "task": "Validate patient insurance",
-    "tool": "validateInsurance",
-    "description": "Verify insurance coverage details"
-  }},
-  ...
-]
-
-Return ONLY the JSON array, no explanation."""
-
-        messages = [
-            SystemMessage(content="You are an expert workflow planner."),
-            HumanMessage(content=prompt)
-        ]
-        messages = [
-                    {
-                      "role": "system",
-                      "content": "You are an expert workflow planner."
-                    },
-                    {
-                      "role": "user",
-                      "content": prompt
-                    }
-                  ]
-        response = ClientSingleton.execute(messages)
-        print(response)
-        # Parse JSON from response
-        import re
-        json_match = re.search(r'\[.*\]', response.content, re.DOTALL)
-        if json_match:
-            api_plan = json.loads(json_match.group(0))
-        else:
-            api_plan = json.loads(response.content)
-        
-        print(f"✓ Created plan with {len(api_plan)} steps")
-        for step in api_plan:
-            print(f"  Step {step['step']}: {step['tool']}")
-        
-        state['api_plan'] = api_plan
-        state['status'] = "planning"
-        return state
-
 
 # ============================================================================
 # AGENT 2: SCHEMA AGENT
@@ -452,7 +353,7 @@ class OrchestratorAgent:
             return state
         
         # Check if we should retry
-        if retry_count >= max_retries:
+        if retry_count >= max_retries or 1:
             print(f"  Decision: ❌ FAIL - Max retries ({max_retries}) reached")
             state['status'] = "failed"
             state['error'] = f"Failed to generate valid code after {max_retries} attempts"

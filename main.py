@@ -1,9 +1,13 @@
+from logger_config import setup_logging
+import logging
+setup_logging(level=logging.INFO, log_file="app.log")
+
 from agent_pipeline import SOPToCodeConverter
 from tools_helper import load_tools_from_toolspec_json
 
 #Load sop
 #ToDo: Consider taking sop file path as user input
-sop_dir='customer_service_sop'
+sop_dir='patient_intake_sop'
 sop_file=f'/Users/maddukuri/Desktop/Papers/all_sops/{sop_dir}/sop.txt'
 output_file=f'/Users/maddukuri/Desktop/Papers/all_sops/{sop_dir}/workflow_1.py'
 with open(sop_file, 'r') as file:
@@ -35,3 +39,5 @@ input_data = {
 #  f.write(result["workflow"]["code"])
 #final_result = execute_workflow(result["workflow"], input_data)
 #print(f"Result: {final_result}")
+
+
