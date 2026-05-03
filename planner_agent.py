@@ -1,4 +1,6 @@
 import re
+import json
+from client import ClientSingleton
 from sop_state import SOPConverterState
 import logging
 logger = logging.getLogger(__name__)
