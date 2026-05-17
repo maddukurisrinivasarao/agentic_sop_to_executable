@@ -11,29 +11,47 @@ Architecture:
 - Orchestrator: Orchestrates
 """
 
-
 from typing import List, Dict, Any, Literal
 from langgraph.graph import StateGraph, END
 #from langchain_anthropic import ChatAnthropic
 from tools_helper import format_tools_for_llm
 from langgraph.checkpoint.memory import MemorySaver
-from planner_agent import PlannerAgent
-from schema_agent import SchemaAgent
-from codegeneration_agent import CodeGeneratorAgent
-from validation_agent import ValidatorAgent
+from planner_agent import PlannerAgent, PlannerAgentError
+from schema_agent import SchemaAgent, SchemaAgentError
+from codegeneration_agent import CodeGeneratorAgent, CodeGeneratorAgentError
+from validation_agent import ValidatorAgent, ValidatorAgentError
+from orchestrator_agent import OrchestratorAgent, OrchestratorError
 from sop_state import SOPConverterState
 import logging
 logger = logging.getLogger(__name__)
 
 memory = MemorySaver()
 
+# Map every custom exception to a clean exit message
+AGENT_EXCEPTIONS = (
+    PlannerAgentError,
+    SchemaAgentError,
+    CodeGeneratorAgentError,
+    ValidatorAgentError,
+    OrchestratorError,
+)
+
+# ============================================================================
+# ROUTING FUNCTION
+# ============================================================================
 
 def should_retry(state: SOPConverterState) -> Literal["retry", "complete", "failed"]:
     """
-    Routing function that determines next step based on orchestrator decision
+    Routing function for LangGraph edge.
+    Reads the status set by OrchestratorAgent and directs the graph accordingly.
     """
-    status = state.get('status', '')
-    
+    status = state.get("status", "")
+    decision = state.get("orchestrator_decision", {})
+
+    logger.info(
+        f"Router: status='{status}' | reason='{decision.get('reason', 'n/a')}'"
+    )
+
     if status == "complete":
         return "complete"
     elif status == "failed":
@@ -41,46 +59,9 @@ def should_retry(state: SOPConverterState) -> Literal["retry", "complete", "fail
     elif status == "retry":
         return "retry"
     else:
-        return "complete"
-# ============================================================================
-# AGENT 5: ORCHESTRATOR AGENT (NEW!)
-# ============================================================================
+        logger.warning(f"Router: Unrecognised status '{status}' — defaulting to failed.")
+        return "failed"
 
-class OrchestratorAgent:
-    """
-    Orchestrator agent that makes decisions about workflow routing
-    Decides whether to retry, continue, or fail
-    """
-    
-    def __call__(self, state: SOPConverterState) -> SOPConverterState:
-        print("\n" + "=" * 80)
-        print("🎯 ORCHESTRATOR AGENT: Making decision...")
-        print("=" * 80)
-        
-        validation = state.get('validation_result', {})
-        retry_count = state.get('retry_count', 0)
-        max_retries = state.get('max_retries', 3)
-        
-        print(f"  Current retry count: {retry_count}/{max_retries}")
-        print(f"  Validation status: {'PASS' if validation.get('is_valid') else 'FAIL'}")
-        
-        if validation.get('is_valid'):
-            print("  Decision: ✅ ACCEPT - Code is valid")
-            state['status'] = "complete"
-            return state
-        
-        # Check if we should retry
-        if retry_count >= max_retries or 1:
-            print(f"  Decision: ❌ FAIL - Max retries ({max_retries}) reached")
-            state['status'] = "failed"
-            state['error'] = f"Failed to generate valid code after {max_retries} attempts"
-            return state
-        
-        # Analyze severity
-        state['retry_count'] = retry_count + 1
-        state['status'] = "retry"
-        
-        return state
 # ============================================================================
 # LANGGRAPH WORKFLOW DEFINITION
 # ============================================================================
@@ -172,19 +153,47 @@ class SOPToCodeConverter:
         #final_state = self.graph.invoke(initial_state,  
         #                                config={"configurable": {"thread_id": "1"}},
         #                                interrupt_before=["validator"])
-        final_state = self.graph.invoke(initial_state)        
-        print("\n" + "=" * 80)
-        print("✅ WORKFLOW COMPLETE")
-        print("=" * 80)
+        try:
+            final_state = self.graph.invoke(initial_state)        
         
-        return {
-            "code": final_state['final_code'],
-            "api_plan": final_state['api_plan'],
-            "input_schema": final_state['input_schema'],
-            "validation": final_state['validation_result']
-        }
+            print("\n" + "=" * 80)
+            print("✅ WORKFLOW COMPLETE")
+            print("=" * 80)
+            
+            return {
+                "code": final_state['final_code'],
+                "api_plan": final_state['api_plan'],
+                "input_schema": final_state['input_schema'],
+                "validation": final_state['validation_result']
+            }
 
-
+        except AGENT_EXCEPTIONS as exc:
+                # Known agent failure
+                agent_name = type(exc).__name__.replace("Error", "Agent")
+                logger.error(f"Pipeline stopped at {agent_name}: {exc}")
+                return {
+                    **initial_state,
+                    "status": "failed",
+                    "error": {
+                        "agent":   agent_name,
+                        "type":    type(exc).__name__,
+                        "message": str(exc),
+                    },
+                    "final_code": None,
+                }
+        except Exception as exc:
+            # Truly unexpected — log full traceback
+            logger.exception(f"Pipeline crashed unexpectedly: {exc}")
+            return {
+                **initial_state,
+                "status": "failed",
+                "error": {
+                    "agent":   "unknown",
+                    "type":    type(exc).__name__,
+                    "message": str(exc),
+                },
+                "final_code": None,
+            }
 # ============================================================================
 # VISUALIZATION HELPER
 # ============================================================================
