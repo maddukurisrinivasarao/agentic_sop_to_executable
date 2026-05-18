@@ -50,7 +50,7 @@ class PlannerAgent:
         # 5. OUTPUT GUARDRAILS
         api_plan = self._validate_output(api_plan, state)
 
-        # 6. COMMIT TO STATE
+        # 6. COMMIT TO 
         print(f"✓ Created plan with {len(api_plan)} steps")
         for step in api_plan:
             print(f"  Step {step['step']}: {step['tool']}")

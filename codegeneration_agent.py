@@ -1,6 +1,7 @@
 import re
 import ast
 import time
+import json
 import logging
 from typing import Optional
 from client import ClientSingleton
@@ -128,6 +129,8 @@ class CodeGeneratorAgent:
 
     def _build_prompt(self, state: SOPConverterState) -> str:
         param_names = [p["name"] for p in state["input_schema"]]
+        required    = [p["name"] for p in state["input_schema"] if p.get("required")]
+        optional    = [p["name"] for p in state["input_schema"] if not p.get("required")]        
         tool_names  = [step["tool"] for step in state["api_plan"]]
 
         return f"""Generate executable Python code for this workflow.
@@ -140,6 +143,11 @@ API Plan:
 
 Input Parameters:
 {json.dumps(state['input_schema'], indent=2)}
+
+CRITICAL — INPUT DATA KEYS:
+You MUST access input_data using ONLY these exact key names:
+  Required : {required}
+  Optional : {optional}
 
 Available Tools:
 {state['tools_formatted']}

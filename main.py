@@ -34,10 +34,27 @@ input_data = {
     "previous_surgeries": ["Appendectomy"],
     "chronic_conditions": ["Hypertension"]
 }
-#print(result["workflow"]["code"])
-#with open(output_file, "w+") as f:
-#  f.write(result["workflow"]["code"])
-#final_result = execute_workflow(result["workflow"], input_data)
+
+
+input_data_2 = {
+    "patient_id": "P100012",
+    "insurance_provider": "Aetna",
+    "policy_number": "INS567890",
+    "group_number": "GRP789012",
+    "coverage_start_date": "2023-06-01",
+    "insurance_type": "Private",
+    "preferred_pharmacy_name": "CVS Pharmacy",
+    "preferred_pharmacy_address": "51414 Fake Street",
+    "pharmacy_phone": "555-777-9999",
+    "smoking_status": "Never",
+    "alcohol_consumption": "Occasional",
+    "exercise_frequency": "5 times per week",
+    "previous_surgeries": ["None"],
+    "chronic_conditions": ["None"]
+}
+with open(output_file, "w+") as f:
+  f.write(result["code"])
+#final_result = execute_workflow(result["code"], input_data)
 #print(f"Result: {final_result}")
 
 
