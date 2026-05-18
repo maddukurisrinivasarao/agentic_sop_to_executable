@@ -16,8 +16,8 @@ class ClientSingleton:
             print("Creating new Groq client instance...")
             # This is where the client is initialized once
             if self._provider == 'groq':
-                #my_api_key = os.environ.get('GROQ_API_KEY')
-                my_api_key = os.environ.get('GROQ_API_KEY_2')
+                my_api_key = os.environ.get('GROQ_API_KEY')
+                #my_api_key = os.environ.get('GROQ_API_KEY_2')
                 self._client = Groq(api_key=my_api_key)
             elif self._provider == 'anthropic':
                 my_api_key = os.environ.get('ANTHROPIC_API_KEY')
