@@ -9,9 +9,10 @@ from sop_state import SOPConverterState
 
 logger = logging.getLogger(__name__)
 
-REQUIRED_IMPORT = "from global_tool_functions import execute_tool_with_structured_output"
+REQUIRED_IMPORT = "from global_tool_functions import get_manager_instance"
 REQUIRED_FUNCTION = "workflow"
-REQUIRED_TOOL_CALL = "execute_tool_with_structured_output"
+REQUIRED_MANAGER_CALL = "get_manager_instance()"
+ALLOWED_IMPORT_MODULES = {"global_tool_functions"}
 MAX_RETRIES = 3
 MAX_CODE_LINES = 500
 MIN_CODE_LINES = 5
@@ -153,31 +154,30 @@ Available Tools:
 {state['tools_formatted']}
 
 CRITICAL REQUIREMENTS:
-1. First line must be: from global_tool_functions import execute_tool_with_structured_output
-2. ALWAYS call execute_tool_with_structured_output(tool_name, tool_input) — never call tools directly
+1. First line must be: from global_tool_functions import get_manager_instance
+2. Call get_manager_instance() ONCE to get the tool manager, then invoke each tool as a direct method call on it — e.g. manager.toolName(param1=...) — never through a generic string dispatcher
 3. Create a function named exactly 'workflow' that accepts a single dict argument named 'input_data'
 4. Access inputs ONLY from these keys: {param_names}
-5. Use ONLY these tool names (verbatim): {tool_names}
-6. Extract results from the returned dict using the correct key names
+5. Use ONLY these tool method names (verbatim), called as manager.<toolName>(...): {tool_names}
+6. Pass tool parameters as keyword arguments matching the tool's documented parameter names
 7. Wrap the entire body in try/except — catch Exception as e and return {{"error": str(e), "status": "failed"}}
 8. Add a descriptive comment above every step
 9. Return the final result as the last statement inside try
 10. Return ONLY raw Python code — no markdown fences, no explanation
+11. Do not import anything other than get_manager_instance from global_tool_functions — no other modules, no direct tools.py imports
 
 TEMPLATE:
-from global_tool_functions import execute_tool_with_structured_output
+from global_tool_functions import get_manager_instance
 
 def workflow(input_data):
     \"\"\"Auto-generated workflow from SOP.\"\"\"
     try:
+        manager = get_manager_instance()
+
         # Step 1: <description>
-        result1 = execute_tool_with_structured_output(
-            tool_name="toolName",
-            tool_input={{
-                "param1": input_data["param1"],
-            }}
+        value1 = manager.toolName(
+            param1=input_data["param1"],
         )
-        value1 = result1["output_key"]
 
         # ... continue for all steps ...
 
@@ -279,11 +279,11 @@ Maximum {MAX_CODE_LINES} lines."""
                 "The generated code must define 'def workflow(input_data)'."
             )
 
-        # --- Required tool call pattern ---
-        if REQUIRED_TOOL_CALL not in code:
+        # --- Required manager call pattern ---
+        if REQUIRED_MANAGER_CALL not in code:
             raise CodeGeneratorAgentError(
-                f"Output guardrail: Missing required tool call pattern "
-                f"'{REQUIRED_TOOL_CALL}'. Tools must not be called directly."
+                f"Output guardrail: Missing required call pattern "
+                f"'{REQUIRED_MANAGER_CALL}'."
             )
 
         # --- try/except present ---
@@ -304,6 +304,9 @@ Maximum {MAX_CODE_LINES} lines."""
 
         # --- Dangerous built-in check ---
         self._check_dangerous_patterns(code)
+
+        # --- Import whitelist ---
+        self._check_imports(code)
 
         # --- Tool name whitelist ---
         self._check_tool_names(code, state)
@@ -334,14 +337,60 @@ Maximum {MAX_CODE_LINES} lines."""
                     f"This may indicate prompt injection via the SOP."
                 )
 
+    def _check_imports(self, code: str) -> None:
+        """Only allow importing from global_tool_functions — no direct tools.py or module access."""
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".")[0]
+                    if root not in ALLOWED_IMPORT_MODULES:
+                        raise CodeGeneratorAgentError(
+                            f"Output guardrail: Disallowed import '{alias.name}'. "
+                            f"Only {ALLOWED_IMPORT_MODULES} may be imported."
+                        )
+            elif isinstance(node, ast.ImportFrom):
+                root = (node.module or "").split(".")[0]
+                if root not in ALLOWED_IMPORT_MODULES:
+                    raise CodeGeneratorAgentError(
+                        f"Output guardrail: Disallowed import from '{node.module}'. "
+                        f"Only {ALLOWED_IMPORT_MODULES} may be imported."
+                    )
+
     def _check_tool_names(self, code: str, state: SOPConverterState) -> None:
-        """Verify every tool name passed to execute_tool_with_structured_output is in the plan."""
+        """Verify every method called on the manager instance is a planned tool."""
         expected_tools = {step["tool"] for step in state.get("api_plan", [])}
         if not expected_tools:
             return
 
-        # Find all tool_name="..." values in the generated code
-        used_tools = set(re.findall(r'tool_name\s*=\s*["\']([^"\']+)["\']', code))
+        tree = ast.parse(code)
+
+        # Find variables assigned directly from get_manager_instance()
+        manager_vars = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                func = node.value.func
+                if isinstance(func, ast.Name) and func.id == "get_manager_instance":
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            manager_vars.add(target.id)
+
+        if not manager_vars:
+            raise CodeGeneratorAgentError(
+                "Output guardrail: No variable assigned from get_manager_instance()."
+            )
+
+        # Find every manager.<method>(...) call
+        used_tools = set()
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in manager_vars
+            ):
+                used_tools.add(node.func.attr)
+
         unknown = used_tools - expected_tools
         if unknown:
             raise CodeGeneratorAgentError(
