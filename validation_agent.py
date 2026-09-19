@@ -192,7 +192,11 @@ Rules:
                 logger.info(
                     f"ValidatorAgent LLM call attempt {attempt}/{MAX_RETRIES}"
                 )
-                response = ClientSingleton.execute(messages)
+                # Higher than the client default: this agent's JSON response
+                # can carry a full `corrected_code` field (up to
+                # MAX_CODE_LINES=500) after the issues/suggestions prose —
+                # the default 2000 truncated it mid-response in practice.
+                response = ClientSingleton.execute(messages, max_tokens=3500)
                 if not response or not hasattr(response, "content"):
                     raise ValidatorAgentError(
                         "LLM returned empty or malformed response."

@@ -1,1 +1,14 @@
-commit	domain	completed	retries	row_pass_rate	error
+commit	domain	completed	retries	row_pass_rate	tokens_used	error
+5a6f1bf	dangerous_goods_sop	False	None	0.00	2671	{"agent": "PlannerAgentAgent", "type": "PlannerAgentError", "message": "Output guardrail: 'tool' at step 1 must be a non-empty string."}
+5a6f1bf	know_your_business_sop	False	None	0.00	8076	{"agent": "CodeGeneratorAgentAgent", "type": "CodeGeneratorAgentError", "message": "LLM call failed after 3 attempts. Last error: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01jmje0pr7erg86acths1c60q7` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199986, Requested 4541. Please try again in 32m35.664s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"}
+5a6f1bf	patient_intake_sop	False	None	0.00	0	{"agent": "PlannerAgentAgent", "type": "PlannerAgentError", "message": "LLM call failed after 3 attempts. Last error: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01jmje0pr7erg86acths1c60q7` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199953, Requested 3751. Please try again in 26m40.128s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"}
+5a6f1bf	dangerous_goods_sop	False	None	0.00	2820	{"agent": "PlannerAgentAgent", "type": "PlannerAgentError", "message": "Output guardrail: 'tool' at step 1 must be a non-empty string."}
+5a6f1bf	know_your_business_sop	True	0	0.00	14910	
+5a6f1bf	patient_intake_sop	False	None	0.00	13764	{"agent": "ValidatorAgentAgent", "type": "ValidatorAgentError", "message": "Parse guardrail: No JSON object found in LLM response.\nResponse (first 500 chars): {\n  \"is_valid\": false,\n  \"issues\": [\n    \"Inconsistent naming for the lifestyle risk level parameter: the code uses `life_style_risk_level` when calling `calculateOverallRisk` and when passing data to `registerPatient`, but the SOP description refers to it as `lifestyle_risk_level`. This may cause a mismatch with the expected tool signature.\"\n  ],\n  \"suggestions\": [\n    \"Rename all occurrences of `life_style_risk_level` to `lifestyle_risk_level` for consistency with the SOP terminology.\",\n    \"A"}
+5a6f1bf	patient_intake_sop	True	0	0.33	13252	
+5a6f1bf	dangerous_goods_sop	True	0	0.33	12951	
+5a6f1bf	know_your_business_sop	True	0	0.00	14990	
+5a6f1bf	patient_intake_sop	True	0	0.00	12984	
+5a6f1bf	dangerous_goods_sop	True	0	0.33	13093	
+5a6f1bf	know_your_business_sop	True	0	0.00	15434	
+5a6f1bf	patient_intake_sop	True	0	0.00	13491	
