@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+venv/
+.DS_Store
+app.log
+eval_sops/
+eval_sops copy/
+experiment_log.md
