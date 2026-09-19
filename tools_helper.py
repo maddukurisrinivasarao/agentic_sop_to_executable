@@ -31,7 +31,16 @@ def format_tools_for_llm(tools: List[Dict[str, Any]]) -> str:
                 formatted += f": {param_info['description']}"
             formatted += "\n"
 
-        formatted += f"   Returns: {tool['returns']}\n"
+        if tool['returns']:
+            formatted += f"   Returns: {tool['returns']}\n"
+        else:
+            # An empty dict here previously rendered as "Returns: {}", which
+            # reads as "returns an empty dict" rather than "undocumented" —
+            # some tools (e.g. patient_intake_sop's) have no outputSchema at
+            # all and actually return a bare string/scalar at runtime, and
+            # that misleading rendering was feeding codegen prompts a false
+            # signal that biased them toward assuming a dict shape.
+            formatted += "   Returns: (not documented in toolspec — do not assume a dict shape)\n"
         formatted += "-" * 80 + "\n\n"
 
     return formatted
