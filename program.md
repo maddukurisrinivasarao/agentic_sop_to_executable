@@ -25,7 +25,7 @@ through every node. Each of the four LLM-calling agents is a callable class:
 read state, call an LLM, parse the response defensively, validate the result,
 write back to state, return state. `orchestrator_agent.py` is the exception —
 it makes no LLM call at all; it's pure decision logic over the validator's
-output (see §3).
+output (see Section 3).
 
 | File | Role |
 |---|---|
@@ -143,7 +143,7 @@ that tuple or failures from it will be swallowed by the generic
 
 Any new code-producing agent must run through the same
 `_check_dangerous_patterns` / whitelist checks that `codegeneration_agent.py`
-and `validation_agent.py` already do. Note the gap in §2.3: none of these
+and `validation_agent.py` already do. Note the gap in Section 2.3: none of these
 existing checks currently second-guess the validator's own `is_valid`
 verdict — if you add anything that does, keep the checks above too rather
 than replacing them.
@@ -164,14 +164,14 @@ before importing anything that creates a logger. Every module does
 Before considering any change here complete:
 - [ ] Run `python test_harness.py` and confirm it appends fresh rows to
       `results.tsv` under the *current* git commit — don't reason from the
-      stale rows already in the file (§2.2).
+      stale rows already in the file (Section 2.2).
 - [ ] Compare `row_pass_rate` per domain against the run immediately before
       your change, not against old/stale rows.
 - [ ] Run `main.py` against a real SOP + toolspec directory without a stack
       trace, including a directory whose SOP is designed to fail — confirm
-      it prints `result["error"]` instead of crashing (§2.1), if you've
+      it prints `result["error"]` instead of crashing (Section 2.1), if you've
       touched `main.py`.
 - [ ] Confirm `app.log` shows one clean pass through every stage that ran
       (`grep -E "AGENT:|validation passed|Decision:" app.log`).
 - [ ] No dangerous-pattern, import-whitelist, or tool-whitelist check was
-      removed or loosened (§4).
+      removed or loosened (Section 4).
