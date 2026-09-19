@@ -11,6 +11,7 @@ the code:
     python test_harness.py
 """
 
+import argparse
 import csv
 import importlib.util
 import inspect
@@ -21,10 +22,17 @@ from pathlib import Path
 
 import global_tool_functions
 from agent_pipeline import SOPToCodeConverter
+from client import ClientSingleton
 from tools_helper import load_tools_from_toolspec_json
 
 EVAL_SOPS_DIR = Path("eval_sops")
 RESULTS_TSV = Path("results.tsv")
+
+# Test-row execution is local (pandas lookups against the mock manager, no
+# LLM calls), so this doesn't affect token spend — it's just wall-clock.
+# Kept small so a domain's score is still meaningful without running every
+# held-out row every experiment.
+MAX_TEST_ROWS = 3
 
 
 def get_git_commit() -> str:
@@ -108,7 +116,13 @@ def score_domain(domain_dir: Path, converter: SOPToCodeConverter) -> dict:
     sop = (domain_dir / "sop.txt").read_text(encoding="utf-8")
     tools = load_tools_from_toolspec_json(str(domain_dir / "toolspecs.json"))
 
+    # Token usage is scoped per domain: reset the counter right before the
+    # only part of this function that calls an LLM (convert()), so
+    # tokens_used below reflects just this domain's conversion, not test-row
+    # execution (which is pure local pandas lookups — no LLM calls).
+    ClientSingleton.reset_usage()
     result = converter.convert(sop, tools)
+    tokens_used = ClientSingleton.get_usage()["total_tokens"]
 
     if result.get("status") == "failed" or not result.get("code"):
         return {
@@ -116,11 +130,12 @@ def score_domain(domain_dir: Path, converter: SOPToCodeConverter) -> dict:
             "completed": False,
             "retries": None,
             "row_pass_rate": 0.0,
+            "tokens_used": tokens_used,
             "error": result.get("error"),
         }
 
     input_cols, output_cols = load_input_output_columns(domain_dir)
-    test_rows = load_test_rows(domain_dir, input_cols, output_cols)
+    test_rows = load_test_rows(domain_dir, input_cols, output_cols, max_rows=MAX_TEST_ROWS)
 
     passed = 0
     for input_data, expected in test_rows:
@@ -151,12 +166,33 @@ def score_domain(domain_dir: Path, converter: SOPToCodeConverter) -> dict:
         "retries": result.get("orchestrator_decision", {}).get("retry_count", 0)
         if isinstance(result.get("orchestrator_decision"), dict) else 0,
         "row_pass_rate": row_pass_rate,
+        "tokens_used": tokens_used,
         "error": None,
     }
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Score the SOP-to-code pipeline against eval_sops/ domains."
+    )
+    parser.add_argument(
+        "--domains",
+        help="Comma-separated domain names to run (default: all domains under "
+             "eval_sops/). Use this to shrink an experiment's token footprint "
+             "by scoring a subset instead of every domain.",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     domains = sorted(d for d in EVAL_SOPS_DIR.iterdir() if d.is_dir())
+    if args.domains:
+        wanted = {name.strip() for name in args.domains.split(",") if name.strip()}
+        domains = [d for d in domains if d.name in wanted]
+        missing = wanted - {d.name for d in domains}
+        if missing:
+            print(f"Warning: unknown domain(s) requested: {', '.join(sorted(missing))}")
     if not domains:
         print(f"No domains found under {EVAL_SOPS_DIR}/")
         return
@@ -165,9 +201,10 @@ def main():
     commit = get_git_commit()
 
     is_new_file = not RESULTS_TSV.exists()
+    total_tokens = 0
     with open(RESULTS_TSV, "a", newline="", encoding="utf-8") as f:
         if is_new_file:
-            f.write("commit\tdomain\tcompleted\tretries\trow_pass_rate\terror\n")
+            f.write("commit\tdomain\tcompleted\tretries\trow_pass_rate\ttokens_used\terror\n")
 
         for domain_dir in domains:
             try:
@@ -178,16 +215,20 @@ def main():
                     "completed": False,
                     "retries": None,
                     "row_pass_rate": 0.0,
+                    "tokens_used": ClientSingleton.get_usage()["total_tokens"],
                     "error": str(exc),
                 }
+            total_tokens += r["tokens_used"]
             f.write(
                 f"{commit}\t{r['domain']}\t{r['completed']}\t{r['retries']}\t"
-                f"{r['row_pass_rate']:.2f}\t{json.dumps(r['error']) if r['error'] else ''}\n"
+                f"{r['row_pass_rate']:.2f}\t{r['tokens_used']}\t"
+                f"{json.dumps(r['error']) if r['error'] else ''}\n"
             )
             print(f"\n>>> {r['domain']}: completed={r['completed']} "
-                  f"row_pass_rate={r['row_pass_rate']:.2f}")
+                  f"row_pass_rate={r['row_pass_rate']:.2f} tokens_used={r['tokens_used']}")
 
     print(f"\nResults appended to {RESULTS_TSV}")
+    print(f"Total tokens used this run: {total_tokens}")
 
 
 if __name__ == "__main__":

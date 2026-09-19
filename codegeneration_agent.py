@@ -131,8 +131,27 @@ class CodeGeneratorAgent:
     def _build_prompt(self, state: SOPConverterState) -> str:
         param_names = [p["name"] for p in state["input_schema"]]
         required    = [p["name"] for p in state["input_schema"] if p.get("required")]
-        optional    = [p["name"] for p in state["input_schema"] if not p.get("required")]        
+        optional    = [p["name"] for p in state["input_schema"] if not p.get("required")]
         tool_names  = [step["tool"] for step in state["api_plan"]]
+
+        # OrchestratorAgent writes retry_feedback specifically so this prompt
+        # can fix the issues that were actually found last attempt, instead
+        # of blindly regenerating from the same inputs and hoping a
+        # different sample happens to avoid them.
+        feedback_section = ""
+        retry_feedback = state.get("retry_feedback")
+        if retry_feedback:
+            previous_code = state.get("generated_code", "")
+            feedback_section = f"""
+RETRY — YOUR PREVIOUS ATTEMPT FAILED VALIDATION:
+{retry_feedback}
+
+Your previous code (fix its specific issues above — don't just rewrite from
+scratch and hope the same mistake doesn't recur):
+```python
+{previous_code}
+```
+"""
 
         return f"""Generate executable Python code for this workflow.
 
@@ -152,7 +171,7 @@ You MUST access input_data using ONLY these exact key names:
 
 Available Tools:
 {state['tools_formatted']}
-
+{feedback_section}
 CRITICAL REQUIREMENTS:
 1. First line must be: from global_tool_functions import get_manager_instance
 2. Call get_manager_instance() ONCE to get the tool manager, then invoke each tool as a direct method call on it — e.g. manager.toolName(param1=...) — never through a generic string dispatcher
@@ -165,6 +184,8 @@ CRITICAL REQUIREMENTS:
 9. Return the final result as the last statement inside try
 10. Return ONLY raw Python code — no markdown fences, no explanation
 11. Do not import anything other than get_manager_instance from global_tool_functions — no other modules, no direct tools.py imports
+12. CROSS-STEP PARAMETERS: any tool parameter name that does NOT appear in the input_data keys above MUST be extracted from an earlier step's return value — never invent it, never leave it out. Find which earlier step's tool documents that exact field under "Returns:" in Available Tools, extract it from that step's result dict by that exact field name, then pass it to the next tool under whatever name THAT tool's "Parameters:" section calls it — the producer's field name and the consumer's parameter name are not guaranteed to match, so map them explicitly (e.g. `registration_number=business_profile["registration_number"]`, not an assumption that the field just carries over under the same name).
+13. TYPE SAFETY ON CHAINED VALUES: never call `.get(`, attribute access, or dict-style indexing on a previous step's return value or on an input_data field without knowing its actual type. A manager method's return value is a dict unless its "Returns:" section says otherwise — check "Returns:" before treating it as one. An input_data field described as an array may arrive as a literal dict/list already (do not call `.get()` on it as if it were the tool's response, and do not assume a string field is a parsed list — pass it straight through if the SOP doesn't require inspecting its contents).
 
 TEMPLATE:
 from global_tool_functions import get_manager_instance
@@ -177,6 +198,13 @@ def workflow(input_data):
         # Step 1: <description>
         value1 = manager.toolName(
             param1=input_data["param1"],
+        )
+
+        # Step 2: <description> — value1 came from Step 1; extract the exact
+        # field name Step 1's tool documents under "Returns:", then pass it
+        # under whatever name Step 2's tool documents under "Parameters:"
+        value2 = manager.otherTool(
+            producer_field_mapped_to_consumer_param=value1["exact_returned_field_name"],
         )
 
         # ... continue for all steps ...
@@ -199,7 +227,10 @@ Maximum {MAX_CODE_LINES} lines."""
                 logger.info(
                     f"CodeGeneratorAgent LLM call attempt {attempt}/{MAX_RETRIES}"
                 )
-                response = ClientSingleton.execute(messages)
+                # Higher than the client default: generated code can run up
+                # to MAX_CODE_LINES=500 in validation_agent.py, and observed
+                # runs so far (60-75 lines) don't reflect that ceiling.
+                response = ClientSingleton.execute(messages, max_tokens=3000)
                 if not response or not hasattr(response, "content"):
                     raise CodeGeneratorAgentError(
                         "LLM returned empty or malformed response."

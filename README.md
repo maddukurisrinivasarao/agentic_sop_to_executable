@@ -114,3 +114,35 @@ referencing an unknown tool, a schema violation, or a banned code pattern
 fails the run rather than being silently patched — so pipeline runs can and
 do fail loudly on model errors (bad JSON, wrong model name, rate limits)
 rather than producing incorrect workflows silently.
+
+## Autonomous experiment loop
+
+This repo also supports an unattended experiment loop in the spirit of
+[karpathy/autoresearch-macos](https://github.com/karpathy/autoresearch-macos):
+point a coding agent at [program.md](program.md) and
+[sop_autoresearch.md](sop_autoresearch.md), let it repeatedly tweak the
+pipeline, run [test_harness.py](test_harness.py), and keep or discard each
+change based on whether `row_pass_rate` improved. The mapping between the
+two isn't 1:1, since autoresearch-macos' "model" is a single script that can
+train and score itself, while this repo's "model" is a 5-agent pipeline
+spread across several files that needs a separate harness to run and score
+it:
+
+| Karpathy file | This repo | Role |
+|---|---|---|
+| `prepare.py` | `eval_sops/`<br>`tools_helper.py`<br>`global_tool_functions.py` | Fixed setup and data — never edited by the agent. |
+| `train.py` | `planner_agent.py`<br>`schema_agent.py`<br>`codegeneration_agent.py`<br>`validation_agent.py`<br>`orchestrator_agent.py`<br>`agent_pipeline.py`<br>`client.py` | The system being improved — edited every experiment. |
+| `program.md` | [program.md](program.md)<br>[sop_autoresearch.md](sop_autoresearch.md) | Agent instructions. His single file covers both "what the system is" and "how to run experiments" — this repo splits them: `program.md` covers the former, `sop_autoresearch.md` the latter. |
+
+One thing has no direct peer: **[test_harness.py](test_harness.py)**. In
+autoresearch-macos, `train.py` scores itself — it trains *and* prints
+`val_bpb` in the same run. Here, the "model" is split across seven files
+that can't score themselves, so `test_harness.py` exists purely to run the
+pipeline against `eval_sops/` and measure `row_pass_rate`.
+
+Budgeting is token-based rather than a fixed experiment count — see
+`sop_autoresearch.md` Section 2 — since a single `test_harness.py` pass across all
+`eval_sops/` domains can use most of a free-tier daily token quota in one
+run.
+
+
