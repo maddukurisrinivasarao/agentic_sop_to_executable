@@ -8,7 +8,7 @@ class ClientSingleton:
     _instance = None
     _client = None
     _provider = 'groq'
-    _model = "llama-3.3-70b-versatile"
+    _model = "openai/gpt-oss-120b"
     @classmethod
     def get_llm_client(self):
         if self._instance is None:

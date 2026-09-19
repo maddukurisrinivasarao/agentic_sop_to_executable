@@ -9,9 +9,10 @@ from sop_state import SOPConverterState
 
 logger = logging.getLogger(__name__)
 
-REQUIRED_IMPORT   = "from global_tool_functions import execute_tool_with_structured_output"
+REQUIRED_IMPORT   = "from global_tool_functions import get_manager_instance"
 REQUIRED_FUNCTION = "workflow"
-REQUIRED_TOOL_CALL = "execute_tool_with_structured_output"
+REQUIRED_MANAGER_CALL = "get_manager_instance()"
+ALLOWED_IMPORT_MODULES = {"global_tool_functions"}
 MAX_RETRIES       = 3
 MAX_CODE_LINES    = 500
 MIN_CODE_LINES    = 5
@@ -154,15 +155,16 @@ Input Schema:
 
 Check ALL of the following:
 1. Every step in the API plan is implemented in the code
-2. Only these tools are used (verbatim): {expected_tools}
-3. Every tool is called via execute_tool_with_structured_output(tool_name, tool_input)
-4. Output values are extracted with correct key names from each tool's result dict
+2. Only these tools are used (verbatim), called as manager.<toolName>(...): {expected_tools}
+3. get_manager_instance() is called once to obtain the manager, and every tool is called as a direct method on it — never through a generic string dispatcher
+4. Tool parameters are passed as keyword arguments matching each tool's documented parameters
 5. Only these input_data keys are accessed: {param_names}
 6. try/except block is present and returns {{"error": str(e), "status": "failed"}}
 7. The function is named exactly 'workflow' and accepts a single dict argument
-8. First line is: from global_tool_functions import execute_tool_with_structured_output
+8. First line is: from global_tool_functions import get_manager_instance
 9. No dangerous calls: eval, exec, os.system, subprocess, open, __import__
-10. Logical execution order matches the SOP dependencies
+10. No imports other than get_manager_instance from global_tool_functions
+11. Logical execution order matches the SOP dependencies
 
 Return ONLY a JSON object with this exact schema:
 {{
@@ -373,10 +375,10 @@ Rules:
                 "Corrected code guardrail: Missing 'def workflow(' function definition."
             )
 
-        # --- Required tool call pattern ---
-        if REQUIRED_TOOL_CALL not in code:
+        # --- Required manager call pattern ---
+        if REQUIRED_MANAGER_CALL not in code:
             raise ValidatorAgentError(
-                f"Corrected code guardrail: Missing '{REQUIRED_TOOL_CALL}' calls."
+                f"Corrected code guardrail: Missing '{REQUIRED_MANAGER_CALL}' call."
             )
 
         # --- try/except ---
@@ -403,9 +405,47 @@ Rules:
                     f"in corrected code."
                 )
 
-        # --- Tool name whitelist ---
+        # --- Import whitelist ---
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split(".")[0] not in ALLOWED_IMPORT_MODULES:
+                        raise ValidatorAgentError(
+                            f"Corrected code guardrail: Disallowed import '{alias.name}'."
+                        )
+            elif isinstance(node, ast.ImportFrom):
+                if (node.module or "").split(".")[0] not in ALLOWED_IMPORT_MODULES:
+                    raise ValidatorAgentError(
+                        f"Corrected code guardrail: Disallowed import from '{node.module}'."
+                    )
+
+        # --- Tool name whitelist (AST-based: manager.<method>(...) calls) ---
         expected_tools = {step["tool"] for step in state.get("api_plan", [])}
-        used_tools = set(re.findall(r'tool_name\s*=\s*["\']([^"\']+)["\']', code))
+        manager_vars = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                func = node.value.func
+                if isinstance(func, ast.Name) and func.id == "get_manager_instance":
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            manager_vars.add(target.id)
+
+        if not manager_vars:
+            raise ValidatorAgentError(
+                "Corrected code guardrail: No variable assigned from get_manager_instance()."
+            )
+
+        used_tools = set()
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in manager_vars
+            ):
+                used_tools.add(node.func.attr)
+
         unknown = used_tools - expected_tools
         if unknown:
             raise ValidatorAgentError(
