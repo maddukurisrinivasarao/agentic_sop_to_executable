@@ -34,6 +34,12 @@ RESULTS_TSV = Path("results.tsv")
 # held-out row every experiment.
 MAX_TEST_ROWS = 3
 
+# Token-budget lever: while iterating on one domain's bugs, running all 3
+# every experiment triples the cost for no benefit. Set to None to go back
+# to scoring every domain under eval_sops/ by default — --domains on the
+# command line always overrides this regardless of its value.
+DEFAULT_DOMAINS = ["patient_intake_sop"]
+
 
 def get_git_commit() -> str:
     try:
@@ -187,8 +193,11 @@ def parse_args():
 def main():
     args = parse_args()
     domains = sorted(d for d in EVAL_SOPS_DIR.iterdir() if d.is_dir())
-    if args.domains:
-        wanted = {name.strip() for name in args.domains.split(",") if name.strip()}
+    requested = args.domains or (
+        ",".join(DEFAULT_DOMAINS) if DEFAULT_DOMAINS else None
+    )
+    if requested:
+        wanted = {name.strip() for name in requested.split(",") if name.strip()}
         domains = [d for d in domains if d.name in wanted]
         missing = wanted - {d.name for d in domains}
         if missing:
