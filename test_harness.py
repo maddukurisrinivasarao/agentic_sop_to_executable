@@ -37,7 +37,7 @@ WORKFLOW_FILENAME = "workflow.py"
 # LLM calls), so this doesn't affect token spend — it's just wall-clock.
 # Kept small so a domain's score is still meaningful without running every
 # held-out row every experiment.
-MAX_TEST_ROWS = 10
+MAX_TEST_ROWS = 3
 
 # Token-budget lever: while iterating on one domain's bugs, running all 3
 # every experiment triples the cost for no benefit. Set to None to go back
