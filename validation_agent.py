@@ -178,7 +178,11 @@ Rules:
 - "is_valid": boolean — true only if code is correct and safe as-is
 - "issues": array of strings — every problem found; empty array if none
 - "suggestions": array of strings — improvements even if code is valid; empty array if none
-- "corrected_code": string with the full corrected Python code if is_valid is false, else null
+- "corrected_code": string with the full corrected Python code if is_valid is false, else null.
+  This must be valid JSON — every literal newline in the code must be
+  written as the two characters \\n (not an actual line break), every
+  double-quote as \\", and every backslash as \\\\. Do not paste the code
+  in with real line breaks inside the string value.
 - Return ONLY the JSON object — no markdown fences, no explanation"""
 
     # =========================================================================
@@ -232,9 +236,18 @@ Rules:
         raw = re.sub(r"^```(?:json)?", "", raw, flags=re.IGNORECASE).strip()
         raw = re.sub(r"```$", "", raw).strip()
 
+        # strict=False: corrected_code embeds a full Python source string
+        # inside a JSON string value, and the model frequently forgets to
+        # escape the literal newlines in it. Strict JSON treats an
+        # unescaped control character inside a string as a hard parse
+        # error ("Unterminated string..."); strict=False is the stdlib's
+        # own documented allowance for exactly this (control chars 0-31,
+        # including \n, permitted inside strings) rather than us trying to
+        # hand-write a JSON repair heuristic.
+
         # Direct parse
         try:
-            parsed = json.loads(raw)
+            parsed = json.loads(raw, strict=False)
             if isinstance(parsed, dict):
                 return parsed
         except json.JSONDecodeError:
@@ -244,7 +257,7 @@ Rules:
         json_match = re.search(r"\{.*\}", raw, re.DOTALL)
         if json_match:
             try:
-                parsed = json.loads(json_match.group(0))
+                parsed = json.loads(json_match.group(0), strict=False)
                 if isinstance(parsed, dict):
                     return parsed
             except json.JSONDecodeError as exc:
