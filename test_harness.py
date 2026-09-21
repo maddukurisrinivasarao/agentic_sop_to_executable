@@ -37,13 +37,16 @@ WORKFLOW_FILENAME = "workflow.py"
 # LLM calls), so this doesn't affect token spend — it's just wall-clock.
 # Kept small so a domain's score is still meaningful without running every
 # held-out row every experiment.
-MAX_TEST_ROWS = 3
+MAX_TEST_ROWS = 10
 
 # Token-budget lever: while iterating on one domain's bugs, running all 3
 # every experiment triples the cost for no benefit. Set to None to go back
 # to scoring every domain under eval_sops/ by default — --domains on the
 # command line always overrides this regardless of its value.
-DEFAULT_DOMAINS = ["patient_intake_sop"]
+# python test_harness.py --domains dangerous_goods_sop,know_your_business_sop 
+# DEFAULT_DOMAIN = None #To run all domains
+#DEFAULT_DOMAINS = ["patient_intake_sop"]
+DEFAULT_DOMAINS = None
 
 
 def get_git_commit() -> str:
@@ -105,6 +108,24 @@ def load_test_rows(domain_dir: Path, input_cols, output_cols, max_rows: int = 5)
             expected = {k: row[k] for k in output_cols if k in row}
             rows.append((input_data, expected))
     return rows
+
+
+def flatten_values(obj):
+    """
+    Recursively collect every leaf value out of a nested dict/list structure.
+    Used so scoring can find an expected value regardless of how deeply the
+    generated code nested it (e.g. inside an audit_trail or registry dict) —
+    the comment above the scoring loop already claimed to check "nested dict
+    values" but the old implementation only ever looked at top-level values.
+    """
+    if isinstance(obj, dict):
+        for v in obj.values():
+            yield from flatten_values(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from flatten_values(item)
+    else:
+        yield obj
 
 
 def run_generated_workflow(code: str, input_data: dict):
@@ -169,11 +190,14 @@ def score_domain(domain_dir: Path, converter: SOPToCodeConverter | None, use_cac
 
     input_cols, output_cols = load_input_output_columns(domain_dir)
     test_rows = load_test_rows(domain_dir, input_cols, output_cols, max_rows=MAX_TEST_ROWS)
-
+    print(f'test_rows={test_rows}\n')
     passed = 0
     for input_data, expected in test_rows:
+        print(f'input_data={input_data}\n\n')
+        print(f'expected={expected}\n\n')
         try:
             actual = run_generated_workflow(code, input_data)
+            print(f'actual={actual}\n\n')
         except Exception as exc:
             print(f"  ✗ row crashed: {exc}")
             continue
@@ -181,7 +205,7 @@ def score_domain(domain_dir: Path, converter: SOPToCodeConverter | None, use_cac
             continue
         # Loose match: every expected key/value pair must appear, as strings,
         # somewhere in the actual result (values, or nested dict values).
-        actual_values = {str(v).strip().lower() for v in actual.values()}
+        actual_values = {str(v).strip().lower() for v in flatten_values(actual)}
         row_ok = all(
             str(v).strip().lower() in actual_values for v in expected.values() if v
         )
