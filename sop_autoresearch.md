@@ -129,6 +129,13 @@ with a 429. Budget on tokens instead:
    - `MAX_TEST_ROWS` in `test_harness.py` (3 as of this setup) only affects
      local pandas lookups, not token spend — don't touch it for budget
      reasons, only for wall-clock ones.
+   - `test_harness.py --test` costs zero tokens by design, but it's not a
+     lever for running more *experiments* — it re-scores whatever's already
+     saved at `eval_sops/<domain>/workflow.py` (written after every real
+     run) without touching the LLM, for hand-editing and re-checking a fix
+     idea before spending tokens on a real generation. It deliberately does
+     not write to `results.tsv`, since cached code isn't tied to the
+     current commit — don't use it to produce a `S_new` for keep/discard.
 5. Still keep a **hard stop at 5 consecutive experiments with no kept
    improvement**, independent of token budget — if the pipeline isn't
    improving, spending more tokens on the same hypothesis space won't help.
