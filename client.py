@@ -8,8 +8,11 @@ from anthropic import Anthropic
 class ClientSingleton:
     _instance = None
     _client = None
-    _provider = 'groq'
+    _provider = 'groq'  # 'groq' | 'anthropic' | 'ollama'
     _model = "openai/gpt-oss-120b"
+    # For _provider = 'ollama', set _model to whatever you've pulled, e.g.
+    # "qwen2.5-coder:7b" — run `ollama pull qwen2.5-coder:7b` first, and
+    # make sure the Ollama app/server is running (localhost:11434).
 
     # Cumulative token usage across every execute() call since the last
     # reset_usage() — this is what the token-budget in sop_autoresearch.md
@@ -28,11 +31,19 @@ class ClientSingleton:
                 #my_api_key = os.environ.get('GROQ_API_KEY')
                 my_api_key = os.environ.get('GROQ_API_KEY_2')
                 self._client = Groq(api_key=my_api_key)
+            elif self._provider == 'ollama':
+                # Ollama exposes an OpenAI-compatible endpoint on localhost —
+                # no API key, no rate limit, runs entirely on your own GPU.
+                # Reuses the Groq SDK purely as an OpenAI-compatible HTTP
+                # client (same request/response shape); execute() below
+                # falls through to the same chat.completions.create() path
+                # used for 'groq'. api_key is a required-but-unchecked string.
+                self._client = Groq(api_key="ollama", base_url="http://localhost:11434/v1")
             elif self._provider == 'anthropic':
                 my_api_key = os.environ.get('ANTHROPIC_API_KEY')
                 self._client = Anthropic(api_key=my_api_key)
             else:
-                raise ValueError("Invalid client name. Valid client names are groq and anthropic")
+                raise ValueError("Invalid client name. Valid client names are groq, ollama, and anthropic")
 
         return self._client
 

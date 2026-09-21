@@ -12,3 +12,27 @@ commit	domain	completed	retries	row_pass_rate	tokens_used	error
 5a6f1bf	dangerous_goods_sop	True	0	0.33	13093	
 5a6f1bf	know_your_business_sop	True	0	0.00	15434	
 5a6f1bf	patient_intake_sop	True	0	0.00	13491	
+c12aec0	patient_intake_sop	False	None	0.00	14706	{"agent": "CodeGeneratorAgentAgent", "type": "CodeGeneratorAgentError", "message": "LLM call failed after 3 attempts. Last error: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01jmje0pr7erg86acths1c60q7` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 197882, Requested 4057. Please try again in 13m57.648s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"}
+87dd305	patient_intake_sop	True	0	0.00	13503	
+87dd305	dangerous_goods_sop	False	None	0.00	2945	{"agent": "PlannerAgentAgent", "type": "PlannerAgentError", "message": "Output guardrail: 'tool' at step 1 must be a non-empty string."}
+87dd305	know_your_business_sop	True	0	0.00	16306	
+87dd305	dangerous_goods_sop	False	None	0.00	16079	{"agent": "ValidatorAgentAgent", "type": "ValidatorAgentError", "message": "Parse guardrail: Found JSON object but could not decode it: Unterminated string starting at: line 13 column 21 (char 976)\nRaw snippet: {\n  \"is_valid\": false,\n  \"issues\": [\n    \"The optional parameter passed to `calculate_handling_score` uses the key `assessmentFormId`, which does not match the expected snake_case parameter name `assessment_form_id` as defined in the input schema and likely required by the tool.\"\n  ],\n  \"suggestions"}
+eafe9c2	dangerous_goods_sop	True	0	0.33	13262	
+f6a65a2	patient_intake_sop	False	None	0.00	15327	{"agent": "ValidatorAgentAgent", "type": "ValidatorAgentError", "message": "Corrected code guardrail: Too short (1 lines, minimum 5)."}
+f6a65a2	patient_intake_sop	False	None	0.00	15918	{"agent": "ValidatorAgentAgent", "type": "ValidatorAgentError", "message": "Corrected code guardrail: Too short (1 lines, minimum 5)."}
+f6a65a2	patient_intake_sop	True	0	1.00	14327	
+f6a65a2	dangerous_goods_sop	False	None	0.00	3265	{"agent": "PlannerAgentAgent", "type": "PlannerAgentError", "message": "Output guardrail: 'tool' at step 1 must be a non-empty string."}
+f6a65a2	dangerous_goods_sop	True	0	1.00	13850	
+f6a65a2	dangerous_goods_sop	True	0	0.33	13208	
+e3ef52a	dangerous_goods_sop	False	None	0.00	2768	{"agent": "PlannerAgentAgent", "type": "PlannerAgentError", "message": "Output guardrail: 'tool' at step 1 must be a non-empty string."}
+e3ef52a	dangerous_goods_sop	False	None	0.00	16302	{"agent": "ValidatorAgentAgent", "type": "ValidatorAgentError", "message": "Corrected code guardrail: Too short (1 lines, minimum 5)."}
+e3ef52a	dangerous_goods_sop	True	0	0.00	17298	
+eb2a90f	dangerous_goods_sop	False	None	0.00	2791	{"agent": "PlannerAgentAgent", "type": "PlannerAgentError", "message": "Output guardrail: 'tool' at step 1 must be a non-empty string."}
+eb2a90f	dangerous_goods_sop	False	None	0.00	11442	{"agent": "CodeGeneratorAgentAgent", "type": "CodeGeneratorAgentError", "message": "Output guardrail: Disallowed import 're'. Only {'global_tool_functions'} may be imported."}
+e3a673a	know_your_business_sop	False	None	0.00	6885	{"agent": "CodeGeneratorAgentAgent", "type": "CodeGeneratorAgentError", "message": "LLM call failed after 3 attempts. Last error: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01jmje0pr7erg86acths1c60q7` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199570, Requested 4974. Please try again in 32m43.008s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"}
+e3a673a	know_your_business_sop	False	None	0.00	19682	{"agent": "ValidatorAgentAgent", "type": "ValidatorAgentError", "message": "Parse guardrail: No JSON object found in LLM response.\nResponse (first 500 chars): {\n  \"is_valid\": false,\n  \"issues\": [\n    \"Step 9 in the API plan (Determine escalation status and prepare final output) is not implemented as a call to the 'calculateRiskScore' tool; the code only calls this tool once in step 8.\",\n    \"The risk_score calculated in step 8 is never used in the escalation decision logic, which deviates from the intended use of the risk score.\"\n  ],\n  \"suggestions\": [\n    \"Add a second call to manager.calculateRiskScore for step 9 to satisfy the API plan.\",\n    \"Inc"}
+e3a673a	know_your_business_sop	True	0	0.00	18332	
+9cd0106	know_your_business_sop	True	0	0.50	18534	
+530a029	know_your_business_sop	True	0	0.50	19347	
+530a029	know_your_business_sop	True	0	0.53	17923	
+530a029	know_your_business_sop	True	0	0.60	18328	
