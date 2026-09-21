@@ -28,6 +28,11 @@ from tools_helper import load_tools_from_toolspec_json
 EVAL_SOPS_DIR = Path("eval_sops")
 RESULTS_TSV = Path("results.tsv")
 
+# Written next to each domain's sop.txt after every real (non-cached) run so
+# --test can re-score that exact code later without spending any tokens
+# regenerating it, for manual debugging.
+WORKFLOW_FILENAME = "workflow.py"
+
 # Test-row execution is local (pandas lookups against the mock manager, no
 # LLM calls), so this doesn't affect token spend — it's just wall-clock.
 # Kept small so a domain's score is still meaningful without running every
@@ -112,33 +117,55 @@ def run_generated_workflow(code: str, input_data: dict):
     return workflow_fn(input_data)
 
 
-def score_domain(domain_dir: Path, converter: SOPToCodeConverter) -> dict:
+def score_domain(domain_dir: Path, converter: SOPToCodeConverter | None, use_cached: bool = False) -> dict:
     domain = domain_dir.name
     print(f"\n{'#'*80}\n# DOMAIN: {domain}\n{'#'*80}")
 
     manager = load_domain_manager(domain_dir)
     global_tool_functions.set_active_manager(manager)
 
-    sop = (domain_dir / "sop.txt").read_text(encoding="utf-8")
-    tools = load_tools_from_toolspec_json(str(domain_dir / "toolspecs.json"))
+    workflow_path = domain_dir / WORKFLOW_FILENAME
 
-    # Token usage is scoped per domain: reset the counter right before the
-    # only part of this function that calls an LLM (convert()), so
-    # tokens_used below reflects just this domain's conversion, not test-row
-    # execution (which is pure local pandas lookups — no LLM calls).
-    ClientSingleton.reset_usage()
-    result = converter.convert(sop, tools)
-    tokens_used = ClientSingleton.get_usage()["total_tokens"]
+    if use_cached:
+        # --test: skip the LLM pipeline entirely, re-score whatever code is
+        # already on disk (possibly hand-edited since the last real run).
+        if not workflow_path.exists():
+            return {
+                "domain": domain,
+                "completed": False,
+                "retries": None,
+                "row_pass_rate": 0.0,
+                "tokens_used": 0,
+                "error": f"--test: no cached {WORKFLOW_FILENAME} found — "
+                         f"run without --test once first to generate one.",
+            }
+        code = workflow_path.read_text(encoding="utf-8")
+        tokens_used = 0
+    else:
+        sop = (domain_dir / "sop.txt").read_text(encoding="utf-8")
+        tools = load_tools_from_toolspec_json(str(domain_dir / "toolspecs.json"))
 
-    if result.get("status") == "failed" or not result.get("code"):
-        return {
-            "domain": domain,
-            "completed": False,
-            "retries": None,
-            "row_pass_rate": 0.0,
-            "tokens_used": tokens_used,
-            "error": result.get("error"),
-        }
+        # Token usage is scoped per domain: reset the counter right before
+        # the only part of this function that calls an LLM (convert()), so
+        # tokens_used below reflects just this domain's conversion, not
+        # test-row execution (pure local pandas lookups — no LLM calls).
+        ClientSingleton.reset_usage()
+        result = converter.convert(sop, tools)
+        tokens_used = ClientSingleton.get_usage()["total_tokens"]
+
+        if result.get("status") == "failed" or not result.get("code"):
+            return {
+                "domain": domain,
+                "completed": False,
+                "retries": None,
+                "row_pass_rate": 0.0,
+                "tokens_used": tokens_used,
+                "error": result.get("error"),
+            }
+
+        code = result["code"]
+        workflow_path.write_text(code, encoding="utf-8")
+        print(f"  (saved generated code to {workflow_path})")
 
     input_cols, output_cols = load_input_output_columns(domain_dir)
     test_rows = load_test_rows(domain_dir, input_cols, output_cols, max_rows=MAX_TEST_ROWS)
@@ -146,7 +173,7 @@ def score_domain(domain_dir: Path, converter: SOPToCodeConverter) -> dict:
     passed = 0
     for input_data, expected in test_rows:
         try:
-            actual = run_generated_workflow(result["code"], input_data)
+            actual = run_generated_workflow(code, input_data)
         except Exception as exc:
             print(f"  ✗ row crashed: {exc}")
             continue
@@ -169,8 +196,10 @@ def score_domain(domain_dir: Path, converter: SOPToCodeConverter) -> dict:
     return {
         "domain": domain,
         "completed": True,
-        "retries": result.get("orchestrator_decision", {}).get("retry_count", 0)
-        if isinstance(result.get("orchestrator_decision"), dict) else 0,
+        "retries": "cached" if use_cached else (
+            result.get("orchestrator_decision", {}).get("retry_count", 0)
+            if isinstance(result.get("orchestrator_decision"), dict) else 0
+        ),
         "row_pass_rate": row_pass_rate,
         "tokens_used": tokens_used,
         "error": None,
@@ -186,6 +215,15 @@ def parse_args():
         help="Comma-separated domain names to run (default: all domains under "
              "eval_sops/). Use this to shrink an experiment's token footprint "
              "by scoring a subset instead of every domain.",
+    )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help=f"Skip the LLM pipeline entirely and re-score each domain's "
+             f"existing {WORKFLOW_FILENAME} (written after the last real "
+             f"run — edit it by hand for manual debugging). Costs zero "
+             f"tokens. Does not write to {RESULTS_TSV} since it's not a "
+             f"fresh generation tied to the current commit.",
     )
     return parser.parse_args()
 
@@ -206,37 +244,51 @@ def main():
         print(f"No domains found under {EVAL_SOPS_DIR}/")
         return
 
-    converter = SOPToCodeConverter()
+    converter = None if args.test else SOPToCodeConverter()
+    if args.test:
+        print(f"\n--test: re-scoring cached {WORKFLOW_FILENAME} files, "
+              f"zero LLM calls, not writing to {RESULTS_TSV}.\n")
+
     commit = get_git_commit()
-
-    is_new_file = not RESULTS_TSV.exists()
-    total_tokens = 0
-    with open(RESULTS_TSV, "a", newline="", encoding="utf-8") as f:
+    results_file = None
+    if not args.test:
+        is_new_file = not RESULTS_TSV.exists()
+        results_file = open(RESULTS_TSV, "a", newline="", encoding="utf-8")
         if is_new_file:
-            f.write("commit\tdomain\tcompleted\tretries\trow_pass_rate\ttokens_used\terror\n")
+            results_file.write("commit\tdomain\tcompleted\tretries\trow_pass_rate\ttokens_used\terror\n")
 
+    total_tokens = 0
+    try:
         for domain_dir in domains:
             try:
-                r = score_domain(domain_dir, converter)
+                r = score_domain(domain_dir, converter, use_cached=args.test)
             except Exception as exc:
                 r = {
                     "domain": domain_dir.name,
                     "completed": False,
                     "retries": None,
                     "row_pass_rate": 0.0,
-                    "tokens_used": ClientSingleton.get_usage()["total_tokens"],
+                    "tokens_used": 0 if args.test else ClientSingleton.get_usage()["total_tokens"],
                     "error": str(exc),
                 }
             total_tokens += r["tokens_used"]
-            f.write(
-                f"{commit}\t{r['domain']}\t{r['completed']}\t{r['retries']}\t"
-                f"{r['row_pass_rate']:.2f}\t{r['tokens_used']}\t"
-                f"{json.dumps(r['error']) if r['error'] else ''}\n"
-            )
+            if results_file is not None:
+                # Written immediately per domain (not batched at the end) so
+                # a crash partway through doesn't lose already-scored rows.
+                results_file.write(
+                    f"{commit}\t{r['domain']}\t{r['completed']}\t{r['retries']}\t"
+                    f"{r['row_pass_rate']:.2f}\t{r['tokens_used']}\t"
+                    f"{json.dumps(r['error']) if r['error'] else ''}\n"
+                )
+                results_file.flush()
             print(f"\n>>> {r['domain']}: completed={r['completed']} "
                   f"row_pass_rate={r['row_pass_rate']:.2f} tokens_used={r['tokens_used']}")
+    finally:
+        if results_file is not None:
+            results_file.close()
 
-    print(f"\nResults appended to {RESULTS_TSV}")
+    if not args.test:
+        print(f"\nResults appended to {RESULTS_TSV}")
     print(f"Total tokens used this run: {total_tokens}")
 
 
