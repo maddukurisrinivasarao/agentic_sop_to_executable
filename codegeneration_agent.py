@@ -181,7 +181,7 @@ CRITICAL REQUIREMENTS:
 6. Pass tool parameters as keyword arguments matching the tool's documented parameter names
 7. Wrap the entire body in try/except — catch Exception as e and return {{"error": str(e), "status": "failed"}}
 8. Add a descriptive comment above every step
-9. Return the final result as the last statement inside try
+9. RETURN VALUE MUST COMBINE EVERY STEP'S RESULT, NOT JUST THE LAST ONE: the final `return` inside `try` must be a dict with one key per step whose output is a named field the SOP's Output/results section asks for — not the bare return value of only the last tool call. Every intermediate variable you computed (including ones only used to feed a later step's parameters) still needs to appear in this final dict if the SOP lists it as an output field. Before writing the return statement, list every field the SOP's Output section names and map each one to the step/variable that produced it — a return statement with fewer keys than the SOP's Output section lists is almost always a bug.
 10. Return ONLY raw Python code — no markdown fences, no explanation
 11. Do not import anything other than get_manager_instance from global_tool_functions — no other modules, no direct tools.py imports
 12. CROSS-STEP PARAMETERS: any tool parameter name that does NOT appear in the input_data keys above MUST be extracted from an earlier step's return value — never invent it, never leave it out. Find which earlier step's tool documents that exact field under "Returns:" in Available Tools, extract it from that step's result dict by that exact field name, then pass it to the next tool under whatever name THAT tool's "Parameters:" section calls it — the producer's field name and the consumer's parameter name are not guaranteed to match, so map them explicitly (e.g. `registration_number=business_profile["registration_number"]`, not an assumption that the field just carries over under the same name).
@@ -210,7 +210,13 @@ def workflow(input_data):
 
         # ... continue for all steps ...
 
-        return final_result
+        # Combine every step's result the SOP's Output section names as a
+        # field — not just the last tool call's return value.
+        return {{
+            "field_name_from_sop_output_section": value1,
+            "another_field_from_sop_output_section": value2,
+            # ... one key per SOP output field, however many steps that spans ...
+        }}
 
     except Exception as e:
         return {{"error": str(e), "status": "failed"}}
