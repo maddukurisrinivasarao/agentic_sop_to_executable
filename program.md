@@ -39,7 +39,7 @@ output (see Section 3).
 | `client.py` | LLM client singleton (Groq by default, `_provider`/`_model` class attrs; Anthropic selectable) |
 | `tools_helper.py` / `global_tool_functions.py` | Tool spec loading + runtime tool execution shim |
 | `main.py` | CLI: convert one `sop_dir` (`sop.txt` + `toolspecs.json`) into `workflow.py` |
-| `test_harness.py` | Runs the pipeline against every domain in `eval_sops/`, scores generated code against held-out CSV rows, appends to `results.tsv` |
+| `test_harness.py` | Runs the pipeline against every domain in `eval_sops/`, scores generated code against held-out CSV rows, appends to `results.tsv`. Saves each domain's generated code to `eval_sops/<domain>/workflow.py`. `--test` skips the LLM pipeline and re-scores that cached file instead (zero tokens, doesn't write to `results.tsv` — for manual debugging, not experiments) |
 | `eval_sops/<domain>/` | Golden SOP + toolspecs + `tools.py` (mock manager) + `test_set_{with,without}_outputs.csv` per domain |
 
 ---
