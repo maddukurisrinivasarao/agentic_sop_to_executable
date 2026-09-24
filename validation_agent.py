@@ -200,7 +200,10 @@ Rules:
                 # can carry a full `corrected_code` field (up to
                 # MAX_CODE_LINES=500) after the issues/suggestions prose —
                 # the default 2000 truncated it mid-response in practice.
-                response = ClientSingleton.execute(messages, max_tokens=3500)
+                # Bumped again for customer_service_sop (10 tools): a longer
+                # generated_code means a longer critique AND a longer
+                # corrected_code, both counted against the same cap.
+                response = ClientSingleton.execute(messages, max_tokens=4500)
                 if not response or not hasattr(response, "content"):
                     raise ValidatorAgentError(
                         "LLM returned empty or malformed response."
