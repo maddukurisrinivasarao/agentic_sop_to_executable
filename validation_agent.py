@@ -203,7 +203,7 @@ Rules:
                 # Bumped again for customer_service_sop (10 tools): a longer
                 # generated_code means a longer critique AND a longer
                 # corrected_code, both counted against the same cap.
-                response = ClientSingleton.execute(messages, max_tokens=4500)
+                response = ClientSingleton.execute(messages, max_tokens=8000)
                 if not response or not hasattr(response, "content"):
                     raise ValidatorAgentError(
                         "LLM returned empty or malformed response."
