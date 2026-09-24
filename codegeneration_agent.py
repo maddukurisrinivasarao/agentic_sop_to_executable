@@ -142,7 +142,28 @@ class CodeGeneratorAgent:
         retry_feedback = state.get("retry_feedback")
         if retry_feedback:
             previous_code = state.get("generated_code", "")
-            feedback_section = f"""
+            # Embedding the full previous attempt is only safe for small
+            # workflows. For larger domains (many tool steps -> hundreds of
+            # lines) this alone can push the retry prompt over Groq's 8000
+            # TPM limit, causing every retry to 413 before the model ever
+            # sees the feedback (customer_service_sop, 10 tools, hit this
+            # on 3 consecutive retries: 9498/9981/9132/9267 tokens
+            # requested). Past this size, drop the code and rely on the
+            # feedback text plus the SOP/plan/tools already in this same
+            # prompt — the model can reconstruct correct code from those
+            # without needing its own prior (flawed) draft verbatim.
+            MAX_PREVIOUS_CODE_CHARS = 4000
+            if len(previous_code) > MAX_PREVIOUS_CODE_CHARS:
+                feedback_section = f"""
+RETRY — YOUR PREVIOUS ATTEMPT FAILED VALIDATION:
+{retry_feedback}
+
+Your previous attempt was too long to include here again — fix every issue
+listed above using the SOP, API plan, and tool docs below; don't repeat the
+same mistakes.
+"""
+            else:
+                feedback_section = f"""
 RETRY — YOUR PREVIOUS ATTEMPT FAILED VALIDATION:
 {retry_feedback}
 
