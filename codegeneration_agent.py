@@ -251,9 +251,14 @@ Maximum {MAX_CODE_LINES} lines."""
                     f"CodeGeneratorAgent LLM call attempt {attempt}/{MAX_RETRIES}"
                 )
                 # Higher than the client default: generated code can run up
-                # to MAX_CODE_LINES=500 in validation_agent.py, and observed
-                # runs so far (60-75 lines) don't reflect that ceiling.
-                response = ClientSingleton.execute(messages, max_tokens=3000)
+                # to MAX_CODE_LINES=500 in validation_agent.py. 3000 was fine
+                # for domains with 4-6 tool steps, but customer_service_sop
+                # (10 tools) hit "missing try/except" twice in a row — the
+                # completion was truncated before the except block, not
+                # actually missing one. Prompt has also grown to 18 items,
+                # which pushes toward longer/more defensive generated code
+                # for any domain, not just this one.
+                response = ClientSingleton.execute(messages, max_tokens=4000)
                 if not response or not hasattr(response, "content"):
                     raise CodeGeneratorAgentError(
                         "LLM returned empty or malformed response."
