@@ -355,8 +355,28 @@ Rules:
 
         corrected = validation.get("corrected_code")
         if corrected and isinstance(corrected, str) and corrected.strip():
+            corrected = corrected.strip()
+            # Repair a known over-escaping failure mode: the model sometimes
+            # writes the literal two characters \n (backslash + n) instead
+            # of a real newline inside the JSON string — valid JSON, but it
+            # means json.loads() faithfully decodes to a string with ZERO
+            # real newlines, so splitlines() sees the whole multi-hundred-
+            # line file as one line and the length guardrail rejects it.
+            # Detected via: no real newlines present at all despite clearly
+            # being a full Python file (has literal "\n" sequences where
+            # real ones should be) — un-escape rather than reject.
+            if "\n" not in corrected and "\\n" in corrected:
+                logger.warning(
+                    "corrected_code has zero real newlines but literal "
+                    "\\n sequences — model over-escaped; un-escaping."
+                )
+                corrected = (
+                    corrected.replace("\\r\\n", "\n")
+                    .replace("\\n", "\n")
+                    .replace('\\"', '"')
+                )
             logger.info("Validation failed — running guardrails on corrected_code.")
-            return self._validate_corrected_code(corrected.strip(), state)
+            return self._validate_corrected_code(corrected, state)
 
         # No correction provided — warn and fall back
         logger.warning(
