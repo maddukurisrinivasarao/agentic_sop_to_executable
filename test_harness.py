@@ -46,7 +46,8 @@ MAX_TEST_ROWS = 3
 # python test_harness.py --domains dangerous_goods_sop,know_your_business_sop 
 # DEFAULT_DOMAIN = None #To run all domains
 #DEFAULT_DOMAINS = ["patient_intake_sop"]
-DEFAULT_DOMAINS = None
+#DEFAULT_DOMAINS = None
+DEFAULT_DOMAINS = ["customer_service_sop"]
 
 
 def get_git_commit() -> str:
