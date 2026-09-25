@@ -166,7 +166,10 @@ Rules:
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
                 logger.info(f"SchemaAgent LLM call attempt {attempt}/{self.MAX_RETRIES}")
-                response = ClientSingleton.execute(messages)
+                # Same reasoning as planner_agent.py's bump: a domain with
+                # many input parameters (each with name/type/required/
+                # description) can run past the client default of 2000.
+                response = ClientSingleton.execute(messages, max_tokens=3000)
 
                 if not response or not hasattr(response, "content"):
                     raise SchemaAgentError("LLM returned empty or malformed response.")

@@ -151,7 +151,12 @@ Rules:
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
                 logger.info(f"LLM call attempt {attempt}/{self.MAX_RETRIES}")
-                response = ClientSingleton.execute(messages)
+                # Higher than the client default (2000): a multi-step plan
+                # with a task/tool/description per step can run past 2000
+                # tokens for domains with several branches, truncating the
+                # response before the closing ] — "No JSON array found"
+                # even though the array just never got to close.
+                response = ClientSingleton.execute(messages, max_tokens=3000)
 
                 # Basic response sanity check
                 if not response or not hasattr(response, "content"):
