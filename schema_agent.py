@@ -202,9 +202,13 @@ Rules:
         raw = re.sub(r"^```(?:json)?", "", raw, flags=re.IGNORECASE).strip()
         raw = re.sub(r"```$", "", raw).strip()
 
+        # strict=False: same fix as planner_agent.py/validation_agent.py —
+        # a field value with an unescaped raw newline is otherwise a hard
+        # parse error in strict JSON even though the content is fine.
+
         # Try direct parse first
         try:
-            parsed = json.loads(raw)
+            parsed = json.loads(raw, strict=False)
             if isinstance(parsed, list):
                 return parsed
         except json.JSONDecodeError:
@@ -214,7 +218,7 @@ Rules:
         json_match = re.search(r"\[.*\]", raw, re.DOTALL)
         if json_match:
             try:
-                return json.loads(json_match.group(0))
+                return json.loads(json_match.group(0), strict=False)
             except json.JSONDecodeError as exc:
                 raise SchemaAgentError(
                     f"Parse guardrail: Found JSON array but could not decode it: {exc}\n"
