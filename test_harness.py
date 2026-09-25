@@ -80,6 +80,69 @@ def load_domain_manager(domain_dir: Path):
     raise RuntimeError(f"No class with process_tool_call found in {tools_path}")
 
 
+def verify_toolspec_matches_manager(domain_dir: Path, manager) -> list[str]:
+    """
+    Cross-check toolspecs.json's declared parameters against each tool's
+    actual method signature on the manager class. Catches exactly the bug
+    class that's cost real token spend across multiple domains: a toolspec
+    missing a parameter the method actually requires (email_intent_sop's
+    get_product_price / marketplace_id), or declaring one the method never
+    implemented (dangerous_goods_sop's assessmentFormId) — both produce a
+    confusing runtime TypeError several LLM calls deep instead of a clear
+    warning up front. Non-fatal: returns warnings, doesn't raise, since a
+    mismatch might be intentional (e.g. **kwargs) rather than a real bug.
+    """
+    toolspecs_path = domain_dir / "toolspecs.json"
+    if not toolspecs_path.exists():
+        return [f"No toolspecs.json found at {toolspecs_path}"]
+
+    with open(toolspecs_path, encoding="utf-8") as f:
+        toolspec_data = json.load(f)
+    if isinstance(toolspec_data, dict) and "toolSpec" in toolspec_data:
+        toolspec_data = [toolspec_data]
+
+    warnings = []
+    for entry in toolspec_data:
+        spec = entry.get("toolSpec", entry)
+        name = spec.get("name")
+        if not name:
+            continue
+
+        method = getattr(manager, name, None)
+        if method is None or not callable(method):
+            warnings.append(f"'{name}' is declared in toolspecs.json but has no matching method on {type(manager).__name__}")
+            continue
+
+        sig_params = set(inspect.signature(method).parameters) - {"self"}
+        # Skip the check entirely if the method accepts **kwargs — any spec
+        # shape is compatible with that.
+        if any(
+            p.kind == inspect.Parameter.VAR_KEYWORD
+            for p in inspect.signature(method).parameters.values()
+        ):
+            continue
+
+        input_schema = spec.get("inputSchema", {})
+        schema_json = input_schema.get("json", input_schema)
+        spec_params = set(schema_json.get("properties", {}).keys())
+
+        missing_from_spec = sig_params - spec_params
+        extra_in_spec = spec_params - sig_params
+        if missing_from_spec:
+            warnings.append(
+                f"'{name}': method takes {sorted(missing_from_spec)} that "
+                f"toolspecs.json never declares — generated code has no way "
+                f"to know these are needed"
+            )
+        if extra_in_spec:
+            warnings.append(
+                f"'{name}': toolspecs.json declares {sorted(extra_in_spec)} "
+                f"that the method doesn't accept — calling with them will "
+                f"raise TypeError"
+            )
+    return warnings
+
+
 def load_input_output_columns(domain_dir: Path):
     """
     Diff test_set_without_outputs.csv against test_set_with_outputs.csv
@@ -146,6 +209,12 @@ def score_domain(domain_dir: Path, converter: SOPToCodeConverter | None, use_cac
 
     manager = load_domain_manager(domain_dir)
     global_tool_functions.set_active_manager(manager)
+
+    spec_warnings = verify_toolspec_matches_manager(domain_dir, manager)
+    if spec_warnings:
+        print("  ⚠️  toolspecs.json / tools.py mismatch(es) found:")
+        for w in spec_warnings:
+            print(f"      - {w}")
 
     workflow_path = domain_dir / WORKFLOW_FILENAME
 
