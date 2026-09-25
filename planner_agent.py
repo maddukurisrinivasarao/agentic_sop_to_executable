@@ -185,9 +185,15 @@ Rules:
         raw = re.sub(r"^```(?:json)?", "", raw, flags=re.IGNORECASE).strip()
         raw = re.sub(r"```$", "", raw).strip()
 
+        # strict=False: field values (e.g. a "description") can legitimately
+        # contain raw newlines the model forgot to escape as \n — strict
+        # JSON treats that as a hard parse error ("Unterminated string...")
+        # even though the content is otherwise fine. Same fix already
+        # applied to validation_agent.py for the identical failure mode.
+
         # Try direct parse first
         try:
-            parsed = json.loads(raw)
+            parsed = json.loads(raw, strict=False)
             if isinstance(parsed, list):
                 return parsed
         except json.JSONDecodeError:
@@ -197,7 +203,7 @@ Rules:
         json_match = re.search(r"\[.*\]", raw, re.DOTALL)
         if json_match:
             try:
-                return json.loads(json_match.group(0))
+                return json.loads(json_match.group(0), strict=False)
             except json.JSONDecodeError as exc:
                 raise PlannerAgentError(
                     f"Parse guardrail: Found a JSON array but could not decode it: {exc}\n"
