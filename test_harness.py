@@ -47,7 +47,8 @@ MAX_TEST_ROWS = 3
 # DEFAULT_DOMAIN = None #To run all domains
 #DEFAULT_DOMAINS = ["patient_intake_sop"]
 #DEFAULT_DOMAINS = None
-DEFAULT_DOMAINS = ["customer_service_sop"]
+#DEFAULT_DOMAINS = ["customer_service_sop"]
+DEFAULT_DOMAINS = ["email_intent_sop"]
 
 
 def get_git_commit() -> str:
