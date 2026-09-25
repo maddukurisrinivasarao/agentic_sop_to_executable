@@ -118,9 +118,10 @@ SOP:
 Available Tools:
 {state['tools_formatted']}
 
-Create a step-by-step API execution plan. For each step:
-1. Identify the task description
-2. Match it to the appropriate tool
+Create a step-by-step API execution plan — a plan of TOOL CALLS, not a
+transcription of every sentence in the SOP. For each step:
+1. Identify a task that requires calling one of the Available Tools
+2. Match it to the exact tool name
 3. Determine the logical sequence
 
 Return a JSON array with this exact schema:
@@ -138,7 +139,15 @@ Rules:
 - Return ONLY the JSON array — no markdown fences, no explanation.
 - Every tool name must be taken verbatim from the Available Tools list.
 - Steps must be sequentially numbered starting from 1.
-- Maximum {self.MAX_PLAN_STEPS} steps."""       
+- Maximum {self.MAX_PLAN_STEPS} steps.
+- Not every sentence in the SOP needs a step here. Many SOPs describe data
+  extraction, formatting, or classification logic (e.g. "extract the ID from
+  the text using pattern matching", "validate the ID format") that has no
+  corresponding tool in Available Tools — that logic gets implemented
+  directly in code later from the SOP text, which the code generator also
+  receives in full. Leave those out of this plan entirely rather than
+  inventing a tool name for them or leaving "tool" empty — every entry you
+  return must name one real, callable tool."""
 
     # =========================================================================
     # LLM CALL WITH RETRY
