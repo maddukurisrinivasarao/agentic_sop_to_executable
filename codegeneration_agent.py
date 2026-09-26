@@ -263,14 +263,19 @@ Maximum {MAX_CODE_LINES} lines."""
                     f"CodeGeneratorAgent LLM call attempt {attempt}/{MAX_RETRIES}"
                 )
                 # Higher than the client default: generated code can run up
-                # to MAX_CODE_LINES=500 in validation_agent.py. 3000 truncated
-                # customer_service_sop (10 tools); 4000 fixed that but then
-                # made retries hover right at Groq's 8000 TPM ceiling
-                # (8331-9207 requested) even after condensing the prompt
-                # itself. 3500 is a middle ground — comfortably above the
-                # 3000 that truncated, while giving retries a better chance
-                # of fitting under the ceiling than 4000 did.
-                response = ClientSingleton.execute(messages, max_tokens=3500)
+                # to MAX_CODE_LINES=500 in validation_agent.py. Tried 3000
+                # (truncated customer_service_sop's 10-tool workflow), then
+                # 3500 (still truncated it on one run) — no value under 4000
+                # reliably avoids truncation for this domain, and 4000 makes
+                # retries land right at Groq's 8000 TPM ceiling
+                # (8331-9329 requested, sometimes clears on retry, sometimes
+                # doesn't). Truncation is the harder failure (guaranteed
+                # rejection, not just a maybe-blocked request), so 4000
+                # stays — see program.md/sop_autoresearch.md for the actual
+                # fix this domain needs (fewer tools per generation, or a
+                # bigger-TPM provider/tier), which prompt tuning alone can't
+                # solve.
+                response = ClientSingleton.execute(messages, max_tokens=4000)
                 if not response or not hasattr(response, "content"):
                     raise CodeGeneratorAgentError(
                         "LLM returned empty or malformed response."
