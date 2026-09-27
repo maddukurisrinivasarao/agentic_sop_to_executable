@@ -8,11 +8,14 @@ from anthropic import Anthropic
 class ClientSingleton:
     _instance = None
     _client = None
-    _provider = 'groq'  # 'groq' | 'anthropic' | 'ollama'
+    _provider = 'groq'  # 'groq' | 'anthropic' | 'ollama' | 'openrouter'
     _model = "openai/gpt-oss-120b"
     # For _provider = 'ollama', set _model to whatever you've pulled, e.g.
     # "qwen2.5-coder:7b" — run `ollama pull qwen2.5-coder:7b` first, and
     # make sure the Ollama app/server is running (localhost:11434).
+    # For _provider = 'openrouter', _model must be one of OpenRouter's own
+    # "<provider>/<model>" IDs from https://openrouter.ai/models — verify
+    # the exact ID there rather than assuming this one carries over.
 
     # Cumulative token usage across every execute() call since the last
     # reset_usage() — this is what the token-budget in sop_autoresearch.md
@@ -39,11 +42,20 @@ class ClientSingleton:
                 # falls through to the same chat.completions.create() path
                 # used for 'groq'. api_key is a required-but-unchecked string.
                 self._client = Groq(api_key="ollama", base_url="http://localhost:11434/v1")
+            elif self._provider == 'openrouter':
+                # Same trick as 'ollama': OpenRouter exposes an OpenAI-
+                # compatible /chat/completions endpoint that aggregates many
+                # providers/models behind one API key, so the Groq SDK works
+                # here purely as a generic OpenAI-compatible HTTP client —
+                # execute() below falls through to the same
+                # chat.completions.create() path used for 'groq'/'ollama'.
+                my_api_key = os.environ.get('OPENROUTER_API_KEY')
+                self._client = Groq(api_key=my_api_key, base_url="https://openrouter.ai/api/v1")
             elif self._provider == 'anthropic':
                 my_api_key = os.environ.get('ANTHROPIC_API_KEY')
                 self._client = Anthropic(api_key=my_api_key)
             else:
-                raise ValueError("Invalid client name. Valid client names are groq, ollama, and anthropic")
+                raise ValueError("Invalid client name. Valid client names are groq, ollama, openrouter, and anthropic")
 
         return self._client
 
