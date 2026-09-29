@@ -130,6 +130,13 @@ class ValidatorAgent:
                 "Ensure SchemaAgent ran successfully."
             )
 
+        # --- tools_formatted ---
+        tools_formatted = state.get("tools_formatted")
+        if not tools_formatted or not isinstance(tools_formatted, str):
+            raise ValidatorAgentError(
+                "Input guardrail: 'tools_formatted' must be a non-empty string."
+            )
+
         logger.info("ValidatorAgent input validation passed.")
 
     # =========================================================================
@@ -147,17 +154,20 @@ Generated Code:
 {state['generated_code']}
 ```
 
-API Plan:
+API Plan (sequence and tool choice only — it does NOT list each tool's
+parameters; for that, see Available Tools below):
 {json.dumps(state['api_plan'], indent=2)}
 
 Input Schema:
 {json.dumps(state['input_schema'], indent=2)}
 
+{state['tools_formatted']}
+
 Check ALL of the following:
 1. Every step in the API plan is implemented in the code
 2. Only these tools are used (verbatim), called as manager.<toolName>(...): {expected_tools}
 3. get_manager_instance() is called once to obtain the manager, and every tool is called as a direct method on it — never through a generic string dispatcher
-4. Tool parameters are passed as keyword arguments matching each tool's documented parameters
+4. Tool parameters are passed as keyword arguments matching each tool's parameter list in the Available Tools section above — that section is the only source of truth for a tool's real parameters. Every parameter marked "required" there must be passed; a parameter NOT listed there at all is the actual problem to flag, not one that's merely absent from the API Plan (the API Plan never lists parameters for any tool, so its silence on a parameter is not evidence that parameter is wrong).
 5. Only these input_data keys are accessed: {param_names}
 6. try/except block is present and returns {{"error": str(e), "status": "failed"}}
 7. The function is named exactly 'workflow' and accepts a single dict argument
@@ -205,15 +215,19 @@ Rules:
                 # corrected_code, both counted against the same cap.
                 response = ClientSingleton.execute(messages, max_tokens=8000)
                 if not response or not hasattr(response, "content"):
-                    raise ValidatorAgentError(
+                    raise RuntimeError(
                         "LLM returned empty or malformed response."
                     )
                 if not isinstance(response.content, str) or not response.content.strip():
-                    raise ValidatorAgentError("LLM response content is blank.")
+                    # Transient: a reasoning model (e.g. OpenRouter's
+                    # openai/gpt-oss-120b) can non-deterministically spend
+                    # the whole max_tokens budget on hidden reasoning before
+                    # emitting content, leaving it blank. Retry like any
+                    # other Exception below instead of failing the node
+                    # outright on one unlucky sample.
+                    raise RuntimeError("LLM response content is blank.")
                 return response
 
-            except ValidatorAgentError:
-                raise
             except Exception as exc:
                 last_exc = exc
                 wait = 2 ** attempt
@@ -376,7 +390,24 @@ Rules:
                     .replace('\\"', '"')
                 )
             logger.info("Validation failed — running guardrails on corrected_code.")
-            return self._validate_corrected_code(corrected, state)
+            try:
+                return self._validate_corrected_code(corrected, state)
+            except ValidatorAgentError as exc:
+                # A broken corrected_code (syntax error, disallowed import,
+                # missing required pattern, ...) used to propagate straight
+                # up through __call__ and end the entire pipeline run
+                # (agent_pipeline.py's AGENT_EXCEPTIONS handling), discarding
+                # every prior retry's progress over one bad LLM sample —
+                # exactly the same "one unlucky sample kills the whole run"
+                # shape already fixed for blank LLM responses. generated_code
+                # already passed CodeGeneratorAgent's own guardrails, so it's
+                # a safe fallback here, same as the "no correction provided"
+                # case below.
+                logger.warning(
+                    f"corrected_code failed its own guardrails ({exc}) — "
+                    "falling back to original generated_code."
+                )
+                return state["generated_code"]
 
         # No correction provided — warn and fall back
         logger.warning(

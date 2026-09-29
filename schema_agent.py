@@ -42,14 +42,32 @@ class SchemaAgent:
             {"role": "user",   "content": prompt},
         ]
 
-        # ── 3. LLM CALL WITH RETRY ────────────────────────────────────────────
-        response = self._call_with_retry(messages)
-
-        # ── 4. SAFE PARSING ───────────────────────────────────────────────────
-        input_schema = self._parse_response(response)
-
-        # ── 5. OUTPUT GUARDRAILS ──────────────────────────────────────────────
-        input_schema = self._validate_output(input_schema, state)
+        # ── 3-5. LLM CALL, PARSING, OUTPUT GUARDRAILS — RETRIED TOGETHER ────────
+        # A parse/guardrail rejection at step 4/5 used to propagate straight
+        # out of __call__ and end the entire pipeline run on the first
+        # attempt, since _call_with_retry only retries the raw LLM call, not
+        # what happens to its output (same architectural gap already fixed
+        # in codegeneration_agent.py). Regenerating is the only way a parse
+        # failure can resolve, so retry the whole sequence here too.
+        last_exc: Optional[Exception] = None
+        input_schema = None
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                response = self._call_with_retry(messages)
+                parsed = self._parse_response(response)
+                input_schema = self._validate_output(parsed, state)
+                break
+            except SchemaAgentError as exc:
+                last_exc = exc
+                logger.warning(
+                    f"SchemaAgent output guardrail rejected attempt "
+                    f"{attempt}/{self.MAX_RETRIES}: {exc}. Regenerating..."
+                )
+        else:
+            raise SchemaAgentError(
+                f"Input schema failed output guardrails after "
+                f"{self.MAX_RETRIES} attempts. Last error: {last_exc}"
+            )
 
         # ── 6. COMMIT TO STATE ────────────────────────────────────────────────
         print(f"✓ Identified {len(input_schema)} input parameters")
@@ -120,7 +138,54 @@ class SchemaAgent:
     # PROMPT BUILDER
     # =========================================================================
 
+    def _compute_parameter_checklist(self, state: SOPConverterState) -> str:
+        """
+        Deterministically enumerate every distinct parameter name required by
+        at least one tool in the plan, and every distinct field name returned
+        by at least one of those tools. Asking the LLM to recall this list
+        from tools_formatted prose is exactly where it starts missing or
+        inventing names once a domain has enough tools (observed directly:
+        a 26-tool domain got a schema with invented parameter names that
+        don't exist in the toolspec at all, and separately missed several
+        real ones). Handing it a precomputed, guaranteed-complete checklist
+        turns "recall N names from a wall of text" into "classify each name
+        in this list" — the second task degrades far less with scale.
+        """
+        tools_by_name = {t["name"]: t for t in state.get("tools", []) if isinstance(t, dict)}
+        plan_tool_names = {step["tool"] for step in state["api_plan"] if step.get("tool")}
+
+        param_names = set()
+        return_names = set()
+        for name in plan_tool_names:
+            tool = tools_by_name.get(name)
+            if not tool:
+                continue
+            param_names.update(tool.get("parameters", {}).keys())
+            returns = tool.get("returns")
+            if isinstance(returns, dict):
+                return_names.update(returns.keys())
+
+        if not param_names:
+            return ""
+
+        return f"""
+Precomputed checklist (do not recompute this by re-reading the tools' prose —
+use it directly): every distinct parameter name required by at least one tool
+your plan actually calls is:
+{sorted(param_names)}
+
+Every distinct field name returned by at least one of those same tools is:
+{sorted(return_names)}
+
+Classify EVERY name in the parameter list above: either it matches (by
+meaning) one of the names in the returns list, or it belongs in your
+input_schema output. Do not output a parameter name that isn't in this
+checklist, and do not omit one that is — this list is complete and
+authoritative for the tools your plan uses; if a name looks unfamiliar or
+you don't remember seeing it, it's still real if it's in this list."""
+
     def _build_prompt(self, state: SOPConverterState) -> str:
+        checklist = self._compute_parameter_checklist(state)
         return f"""Identify all BASE-LEVEL input parameters for this workflow.
 
 SOP:
@@ -131,11 +196,96 @@ API Plan:
 
 Available Tools:
 {state['tools_formatted']}
+{checklist}
 
 Base-level inputs are parameters that:
 - Are NOT outputs from other tools in the plan
 - Must be provided by the user at workflow start
 - Cannot be derived or computed from earlier steps
+
+Find them two ways, and take the union — neither alone is complete:
+
+FIRST, mechanically, not by reading the SOP's own narrative for what it
+calls an "input": for EVERY tool in the API Plan (every occurrence, not just
+the first time a tool name appears — later steps can reuse a tool with
+different call-site parameters), list every parameter in that tool's
+"Parameters:" section under Available Tools. For each one, check whether any
+EARLIER step's tool "Returns:" a field that supplies it — MATCH BY MEANING,
+NOT EXACT STRING: a "Returns:" field and a "Parameters:" field naming the
+same concept are very often spelled differently in this data (the same
+boolean can appear as `is account id valid` in one tool's Returns and
+`is_account_id_valid` in another tool's Parameters — spaced vs. snake_case,
+and occasionally a genuine synonym). Read what each field actually holds,
+not just its literal spelling, before concluding nothing upstream supplies
+it. If, after that meaning-level check, no earlier step's output covers it,
+it is a base-level input — regardless of whether the SOP's prose ever calls
+it out as something "the user provides" or "the customer submits". A
+parameter can be required by a tool the SOP describes as an internal lookup
+(e.g. "check the service area for outages") without the SOP ever mentioning
+that lookup needs a caller-supplied code — the tool's own "Parameters:" list
+is still authoritative and still makes it a base-level input if nothing
+upstream produces it, under the meaning-matching rule above. Missing one of
+these silently breaks every later step that calls that tool, however the
+generated code chooses to compensate (a placeholder, a guess derived from
+some other field, etc.) — the fix belongs here, not in a workaround
+downstream.
+
+SECOND, separately, read the SOP's own "Input"/"Definitions" section (the
+part that names things like an identifier, a free-text body, a timestamp)
+and include every field it names there too — even ones NO tool ever takes
+as a parameter. Not every base-level input feeds a tool call: some are only
+used by the generated code's own inline logic (extracting a value from a
+free-text field, echoing an identifier straight into the output, branching
+on a flag) and never appear in any "Parameters:" list at all. The first,
+mechanical pass will never find these on its own, because by definition
+they're absent from every tool's parameters — skipping this second pass
+because "the mechanical check already covered inputs" is exactly the gap
+that produces a workflow silently missing its own primary key or main
+content field (e.g. an email-processing workflow that fetches every
+product's price/description/status but never once reads the email's
+own id or body, because neither is ever passed to a tool).
+
+Before adding a field found this second way, check it's not just a prose
+RESTATEMENT of a field the mechanical pass already covered under a
+different spelling — an SOP can describe the same real-world field with
+one name in its "Input" section and a shorter/different name in its
+procedure steps or a tool's actual "Parameters:" list (e.g. an Input
+section listing "operating_system" and "browser_specification" as prose
+labels, while the procedure text and every tool actually use `os` and
+`browser`). When that happens, the tool's real parameter spelling is
+authoritative — it's what `input_data` will actually be keyed by at
+runtime — so use that spelling and do NOT also add the Input section's
+prose version as a second, separate field; that produces two entries for
+one real value, and the one you invented from prose has no real column to
+read from.
+
+Two things are NEVER base-level inputs, even if the mechanical check above
+seems to suggest one: (1) anything the SOP's own Output/Deliverables section
+lists as something this workflow produces — a field the workflow computes
+and returns is not also something it must receive as an input; (2) any
+intermediate decision/flag your own reasoning about the SOP concludes is
+*derived* from tool results (a boolean like "is authenticated" or "is
+eligible" that a later step's logic decides, rather than a value a tool
+literally returns unchanged) — if you can't point to one specific tool's
+"Returns:" field (by meaning) that IS this value, it isn't a base-level
+input just because no tool's Returns matches it exactly; it's something the
+generated code must compute, and belongs nowhere in this list.
+
+Rule (2) still applies even when the derivation takes real logic to write —
+a boolean check, a comparison against a threshold, string matching, picking
+one of several tool results — not just a rename. "No tool returns this
+value under any name" does NOT default to "therefore it's a base-level
+input": it defaults to "the generated code must compute it from what tools
+DO return", which is a normal, expected part of turning an SOP into code,
+not a gap to plug with an extra input. `is_authenticated` in a workflow
+where authentication is decided by whether `getAuthenticationDetails`
+returned any records — computed with one `bool(...)` check, still NOT a
+base-level input, even though no tool's "Returns:" is spelled anything like
+"authenticated". Ask yourself, for every candidate: "if I removed this from
+the input list, could the workflow still produce it purely from tool calls
+plus ordinary Python logic (if/comparison/boolean)?" — if yes, it does NOT
+belong in your output, no matter how naturally it reads as an "input" to
+the decision it feeds.
 
 Return a JSON array using this exact schema:
 [
@@ -151,7 +301,19 @@ Return a JSON array using this exact schema:
 Rules:
 - "type" must be one of: string, integer, number, boolean, array, object
 - "required" must be a boolean (true or false), never a string
-- "name" must be snake_case, no spaces
+- "name" must be copied EXACTLY as it's spelled in the tool's "Parameters:"
+  list under Available Tools — do not normalize casing, add/remove
+  underscores, or otherwise "clean up" the spelling, even if it looks
+  inconsistent (a real parameter can be `Captcha_tries` with a capital C).
+  The generated workflow reads this value out of `input_data` using this
+  exact string as the dict key, and `input_data`'s keys are the raw column
+  headers from the source data — a normalized name that no longer matches
+  the real header causes a `KeyError` at runtime that a spec/schema review
+  won't catch, since everything still *looks* correct. The one time to
+  choose the name yourself (snake_case is a reasonable default here) is for
+  a field found only in the SOP's own Input/Definitions section that no
+  tool ever takes as a parameter — there, no external spelling constrains
+  you.
 - Return ONLY the JSON array — no markdown fences, no explanation
 - Maximum {self.MAX_PARAMS} parameters"""
 
@@ -169,17 +331,25 @@ Rules:
                 # Same reasoning as planner_agent.py's bump: a domain with
                 # many input parameters (each with name/type/required/
                 # description) can run past the client default of 2000.
-                response = ClientSingleton.execute(messages, max_tokens=3000)
+                # Bumped again for video_annotation_sop (26 tools, ~23
+                # distinct parameters plus the deterministic checklist in
+                # the prompt): 3000 produced "No JSON array found" — the
+                # array likely ran past the cap before closing.
+                response = ClientSingleton.execute(messages, max_tokens=6000)
 
                 if not response or not hasattr(response, "content"):
-                    raise SchemaAgentError("LLM returned empty or malformed response.")
+                    raise RuntimeError("LLM returned empty or malformed response.")
                 if not isinstance(response.content, str) or not response.content.strip():
-                    raise SchemaAgentError("LLM response content is blank.")
+                    # Transient: a reasoning model (e.g. OpenRouter's
+                    # openai/gpt-oss-120b) can non-deterministically spend
+                    # the whole max_tokens budget on hidden reasoning before
+                    # emitting content, leaving it blank. Retry like any
+                    # other Exception below instead of failing the node
+                    # outright on one unlucky sample.
+                    raise RuntimeError("LLM response content is blank.")
 
                 return response
 
-            except SchemaAgentError:
-                raise  # Never retry our own validation errors
             except Exception as exc:
                 last_exc = exc
                 wait = 2 ** attempt
@@ -286,10 +456,17 @@ Rules:
                     f"Output guardrail: param '{name}' name exceeds "
                     f"{self.MAX_PARAM_NAME_LENGTH} characters."
                 )
-            if not re.match(r"^[a-z][a-z0-9_]*$", name):
+            # A valid Python identifier shape (letters/digits/underscores,
+            # not starting with a digit) — NOT forced to lowercase, since a
+            # real tool parameter can use mixed case (e.g. `Captcha_tries`)
+            # and the prompt now explicitly asks for exact spelling, not
+            # normalized snake_case, to keep this name usable as a literal
+            # `input_data[...]` dict key against the real column header.
+            if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
                 raise SchemaAgentError(
-                    f"Output guardrail: param name '{name}' must be snake_case "
-                    f"(lowercase letters, digits, underscores; start with a letter)."
+                    f"Output guardrail: param name '{name}' must look like a "
+                    f"valid identifier (letters, digits, underscores; not "
+                    f"starting with a digit) — no spaces or punctuation."
                 )
 
             # --- Duplicate names ---

@@ -44,14 +44,34 @@ class CodeGeneratorAgent:
             {"role": "user",   "content": prompt},
         ]
 
-        # ── 3. LLM CALL WITH RETRY ────────────────────────────────────────────
-        response = self._call_with_retry(messages)
-
-        # ── 4. SAFE EXTRACTION ────────────────────────────────────────────────
-        code = self._extract_code(response)
-
-        # ── 5. OUTPUT GUARDRAILS ──────────────────────────────────────────────
-        code = self._validate_output(code, state)
+        # ── 3-5. LLM CALL, EXTRACTION, OUTPUT GUARDRAILS — RETRIED TOGETHER ─────
+        # A rejection at step 5 (e.g. a dangerous-pattern guardrail, a missing
+        # required element) used to propagate straight out of __call__ and
+        # end the ENTIRE pipeline run on the very first attempt — before the
+        # orchestrator's own retry loop ever got a turn, since _call_with_retry
+        # only retries the raw LLM call, not what happens to its output.
+        # Regenerating (a fresh LLM call, not just re-validating the same
+        # rejected code) is the only way a guardrail rejection can resolve, so
+        # retry the whole (call, extract, validate) sequence here instead.
+        last_exc: Optional[Exception] = None
+        code = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                response = self._call_with_retry(messages)
+                candidate = self._extract_code(response)
+                code = self._validate_output(candidate, state)
+                break
+            except CodeGeneratorAgentError as exc:
+                last_exc = exc
+                logger.warning(
+                    f"CodeGeneratorAgent output guardrail rejected attempt "
+                    f"{attempt}/{MAX_RETRIES}: {exc}. Regenerating..."
+                )
+        else:
+            raise CodeGeneratorAgentError(
+                f"Generated code failed output guardrails after {MAX_RETRIES} "
+                f"attempts. Last error: {last_exc}"
+            )
 
         # ── 6. COMMIT TO STATE ────────────────────────────────────────────────
         line_count = len(code.splitlines())
@@ -215,6 +235,11 @@ CRITICAL REQUIREMENTS:
 19. VERIFY EVERY TOOL CALL AGAINST ITS OWN FULL "Parameters:" LIST: after each `manager.<toolName>(...)` call, confirm every required parameter is passed, including ones taken straight from input_data. The SOP's prose naming one input ("using the validated product_id") names the key input for a reader, not an exhaustive parameter list — the tool's own "Parameters:" is always authoritative regardless of the SOP's phrasing.
 20. CLASSIFYING FREE TEXT (e.g. email intent): don't gate a category on one exact phrase — match several plausible phrasings/synonyms per category, since real text paraphrases the SOP's wording ("isn't listed yet" vs. "not listed").
 21. IF THE SOP SAYS "REGULAR EXPRESSIONS"/"PATTERN MATCHING", DO NOT IMPORT `re` (not whitelisted, rule 11) — implement the same check with `.startswith()`/`.split()`/slicing/`.isdigit()`/`.isalnum()` etc.; every fixed-format pattern is expressible this way.
+22. NEVER PASS A HARDCODED LITERAL FOR A TOOL PARAMETER THAT HAS A REAL SOURCE: if a parameter's value is available from `input_data` (rule 4's key list) or an earlier step's return (rule 12), it must come from there — never a made-up placeholder string/number that merely looks plausible (e.g. `service_type="internet"`, `region="UNKNOWN"`), even as a "default" for a branch you think is unreachable. A hardcoded guess only coincidentally matches real data and silently breaks every input where it doesn't — this fails louder than most bugs here (the tool's own lookup rejects it) but only on whichever inputs happen to differ from the guess, so it can still pass a small sample of test rows undetected.
+23. EARLY-TERMINATION CHECKLIST — BUILD IT BEFORE WRITING ANY CODE: scan the entire SOP text for every sentence that stops the process early — phrases like "conclude the case", "terminate the process", "close the case", "ineligible for support", "immediately terminate", "log the issue and stop". For EACH one found, write down: (a) which step's result the triggering condition depends on, and (b) what the function must return at that point. Then, when writing the code, insert that check as an explicit `if <condition>: return {{...}}` placed IMMEDIATELY after the step that produces the condition's value — never deferred to a later "determine final status" section, and never implemented merely by skipping ONE subsequent optional step while still letting every step after that run unconditionally. A termination condition almost always means "stop calling tools entirely from here on", not "skip the next tool but keep going" — if a later step's tool call assumes a state that an earlier termination condition rules out (e.g. calling a diagnostics tool for an account already established as ineligible), the fixture data for that later tool won't exist for that case, and the call raises a lookup error instead of the SOP's intended clean early return. Before finalizing the code, re-read your own checklist from this rule and verify each entry has a matching `return` placed at the right step — a rule you "know about" but positioned incorrectly (e.g. only gating the very next line instead of everything downstream) is the same bug as not having it.
+24. NEVER SUBSTITUTE A "SIMPLIFYING ASSUMPTION" FOR A CHECK THE SOP DEFINES WITH REAL CONDITIONS: if the SOP states a specific rule for deriving a decision variable (e.g. "if you find a failed login attempt and no record of successful recovery, classify authentication as failed"), and a tool's documented "Returns:" shape gives you the actual fields that rule needs (e.g. `login_status`, `account_recovery_status`), you MUST implement that exact check. Writing `is_authenticated = True  # for simplicity, assume success` (or any comment along those lines — "assume", "simplify", "for now") is not a simplification, it is skipping a rule the SOP explicitly wrote out and the tool's Returns explicitly supports checking. If a "Returns:" field's shape is genuinely undocumented (rule 13), that's the one case where a coarser heuristic is defensible — but once the shape IS documented (has a "properties"/named-fields breakdown, not just "shape not further specified"), you have no basis to call it undocumented and skip the real check.
+25. A NON-EMPTY OBJECT IS ALWAYS TRUTHY, REGARDLESS OF WHAT'S INSIDE IT: `bool(some_dict)` / `if some_dict:` tests only whether the dict has any keys at all — a dict shaped `{{"login_status": "FAILURE", "account_recovery_status": "FAILURE"}}` is just as truthy as one shaped `{{"login_status": "SUCCESS"}}`. If a tool's documented "Returns:" gives you a status/outcome FIELD inside an object, checking the object's own truthiness is never a substitute for checking that field's actual value — it will silently evaluate to "success"/"present" on every row where the object exists at all, which for most fixture data is every row, defeating the check entirely while looking like it does something.
+26. EVERY `input_data[...]` VALUE IS A RAW STRING, EVEN WHEN ITS NAME OR SOP DESCRIPTION SOUNDS NUMERIC OR BOOLEAN: `input_data` always arrives as text (from a CSV cell or a real caller), never a real `int`/`float`/`bool`, regardless of what the SOP or a parameter's own description implies about its type. Comparing a raw `input_data` value directly with `<`/`>`/`<=`/`>=` against a numeric literal (e.g. `input_data["confidence_score"] < 0.85`) raises `TypeError: '<' not supported between instances of 'str' and 'float'` — a hard crash on every single row, not just wrong output. Before any numeric or boolean comparison, arithmetic, or threshold check involving an `input_data` field, cast it explicitly: `float(input_data["confidence_score"])`, `int(input_data["retry_count"])`, or for booleans `str(input_data["flag"]).strip().lower() == "true"` (Python's own `bool("False")` is `True` — never use bare `bool(...)` on a string). This applies even to a value you're about to pass straight into a tool call that itself expects that type.
 
 TEMPLATE:
 from global_tool_functions import get_manager_instance
@@ -262,30 +287,31 @@ Maximum {MAX_CODE_LINES} lines."""
                 logger.info(
                     f"CodeGeneratorAgent LLM call attempt {attempt}/{MAX_RETRIES}"
                 )
-                # Higher than the client default: generated code can run up
-                # to MAX_CODE_LINES=500 in validation_agent.py. Tried 3000
-                # (truncated customer_service_sop's 10-tool workflow), then
-                # 3500 (still truncated it on one run) — no value under 4000
-                # reliably avoids truncation for this domain, and 4000 makes
-                # retries land right at Groq's 8000 TPM ceiling
-                # (8331-9329 requested, sometimes clears on retry, sometimes
-                # doesn't). Truncation is the harder failure (guaranteed
-                # rejection, not just a maybe-blocked request), so 4000
-                # stays — see program.md/sop_autoresearch.md for the actual
-                # fix this domain needs (fewer tools per generation, or a
-                # bigger-TPM provider/tier), which prompt tuning alone can't
-                # solve.
-                response = ClientSingleton.execute(messages, max_tokens=4000)
+                # 4000 was a Groq-TPM-era compromise (8000 TPM ceiling made
+                # anything higher unreliable for customer_service_sop's
+                # 10-tool prompt). On OpenRouter that ceiling doesn't apply,
+                # and OpenRouter's reasoning models (e.g. openai/gpt-oss-120b)
+                # spend part of max_tokens on a hidden `reasoning` field
+                # before emitting visible content — for a complex generation
+                # prompt that can consume most of a 4000 budget by itself,
+                # leaving `content` blank. 8000 matches validation_agent.py's
+                # already-proven budget for the same model/provider.
+                response = ClientSingleton.execute(messages, max_tokens=8000)
                 if not response or not hasattr(response, "content"):
-                    raise CodeGeneratorAgentError(
+                    raise RuntimeError(
                         "LLM returned empty or malformed response."
                     )
                 if not isinstance(response.content, str) or not response.content.strip():
-                    raise CodeGeneratorAgentError("LLM response content is blank.")
+                    # Transient, not a hard failure: a reasoning model can
+                    # burn the whole max_tokens budget on hidden reasoning
+                    # tokens before emitting content, non-deterministically.
+                    # Retrying (like any other Exception below) usually
+                    # succeeds; treating it as an unretryable
+                    # CodeGeneratorAgentError (as before) wasted the entire
+                    # node on one unlucky sample.
+                    raise RuntimeError("LLM response content is blank.")
                 return response
 
-            except CodeGeneratorAgentError:
-                raise
             except Exception as exc:
                 last_exc = exc
                 wait = 2 ** attempt

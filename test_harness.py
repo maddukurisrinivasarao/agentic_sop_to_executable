@@ -12,12 +12,14 @@ the code:
 """
 
 import argparse
+import ast
 import csv
 import importlib.util
 import inspect
 import json
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import global_tool_functions
@@ -37,7 +39,7 @@ WORKFLOW_FILENAME = "workflow.py"
 # LLM calls), so this doesn't affect token spend — it's just wall-clock.
 # Kept small so a domain's score is still meaningful without running every
 # held-out row every experiment.
-MAX_TEST_ROWS = 3
+MAX_TEST_ROWS = 10000
 
 # Token-budget lever: while iterating on one domain's bugs, running all 3
 # every experiment triples the cost for no benefit. Set to None to go back
@@ -47,8 +49,8 @@ MAX_TEST_ROWS = 3
 # DEFAULT_DOMAIN = None #To run all domains
 #DEFAULT_DOMAINS = ["patient_intake_sop"]
 #DEFAULT_DOMAINS = None
-#DEFAULT_DOMAINS = ["customer_service_sop"]
-DEFAULT_DOMAINS = ["email_intent_sop"]
+DEFAULT_DOMAINS = ["customer_service_sop"]
+#DEFAULT_DOMAINS = ["email_intent_sop"]
 
 
 def get_git_commit() -> str:
@@ -113,20 +115,57 @@ def verify_toolspec_matches_manager(domain_dir: Path, manager) -> list[str]:
             warnings.append(f"'{name}' is declared in toolspecs.json but has no matching method on {type(manager).__name__}")
             continue
 
-        sig_params = set(inspect.signature(method).parameters) - {"self"}
+        # Stub detection: a method whose body is only a docstring + `pass`
+        # silently returns None instead of doing anything — generated code
+        # calling it gets None back and crashes on the first .get()/index
+        # into it, or a downstream tool's lookup fails because the "work"
+        # this step was supposed to record never happened. Found the hard
+        # way: video_annotation_sop had 20 of 26 tools as bare-`pass` stubs
+        # (77%), invisible to every other check here since the signature
+        # and toolspec still matched perfectly — only actually calling the
+        # method, or reading its source, reveals it does nothing.
+        try:
+            source = inspect.getsource(method)
+            tree_body = ast.parse(textwrap.dedent(source)).body[0].body  # type: ignore[union-attr]
+            non_doc = [
+                n for n in tree_body
+                if not (isinstance(n, ast.Expr) and isinstance(getattr(n, "value", None), ast.Constant)
+                        and isinstance(n.value.value, str))
+            ]
+            if len(non_doc) == 1 and isinstance(non_doc[0], ast.Pass):
+                warnings.append(
+                    f"'{name}' is an unimplemented stub (body is just `pass`) — "
+                    f"it silently returns None instead of doing anything"
+                )
+        except (OSError, TypeError, SyntaxError, IndexError):
+            pass  # can't get source (e.g. built-in/C-implemented) — skip
+
+        sig = inspect.signature(method)
+        sig_params = set(sig.parameters) - {"self"}
         # Skip the check entirely if the method accepts **kwargs — any spec
         # shape is compatible with that.
         if any(
             p.kind == inspect.Parameter.VAR_KEYWORD
-            for p in inspect.signature(method).parameters.values()
+            for p in sig.parameters.values()
         ):
             continue
+
+        # A parameter with a Python default is genuinely optional — the
+        # method works fine without a caller ever supplying it, so a spec
+        # that omits it isn't missing anything the generated code actually
+        # needs. Only params with no default are "required for the method
+        # to work at all", which is what this check is really for.
+        required_sig_params = {
+            n for n, p in sig.parameters.items()
+            if n != "self" and p.default is inspect.Parameter.empty
+            and p.kind != inspect.Parameter.VAR_POSITIONAL
+        }
 
         input_schema = spec.get("inputSchema", {})
         schema_json = input_schema.get("json", input_schema)
         spec_params = set(schema_json.get("properties", {}).keys())
 
-        missing_from_spec = sig_params - spec_params
+        missing_from_spec = required_sig_params - spec_params
         extra_in_spec = spec_params - sig_params
         if missing_from_spec:
             warnings.append(
@@ -276,10 +315,48 @@ def score_domain(domain_dir: Path, converter: SOPToCodeConverter | None, use_cac
             continue
         # Loose match: every expected key/value pair must appear, as strings,
         # somewhere in the actual result (values, or nested dict values).
-        actual_values = {str(v).strip().lower() for v in flatten_values(actual)}
-        row_ok = all(
-            str(v).strip().lower() in actual_values for v in expected.values() if v
-        )
+        actual_leaves = list(flatten_values(actual))
+        actual_values = {str(v).strip().lower() for v in actual_leaves}
+
+        def _to_float(x):
+            try:
+                return float(x)
+            except (TypeError, ValueError):
+                return None
+
+        actual_numbers = {n for n in (_to_float(v) for v in actual_leaves) if n is not None}
+
+        def _expected_matches(v) -> bool:
+            v_str = str(v).strip()
+            if v_str.lower() in actual_values:
+                return True
+            # Numeric equivalence, not just string equality — "0" and "0.0"
+            # (or "5" and "5.00") are the same value but fail a pure string
+            # comparison; a workflow defaulting an unused numeric field to a
+            # bare `0` instead of the ground truth's `0.0` shouldn't fail an
+            # otherwise-correct row over formatting.
+            v_num = _to_float(v_str)
+            if v_num is not None and v_num in actual_numbers:
+                return True
+            # A CSV cell holding a stringified list/dict (e.g.
+            # "['Wrong Item']") never equals any single flattened leaf of a
+            # *real* list/dict the workflow returns (flatten_values yields
+            # 'Wrong Item', not "['Wrong Item']") — every list/array-shaped
+            # ground-truth field would fail this check even when the
+            # workflow's answer is exactly right. Parse it and require each
+            # of its own elements to appear instead.
+            if v_str.startswith(("[", "{")):
+                try:
+                    parsed = ast.literal_eval(v_str)
+                except (ValueError, SyntaxError):
+                    return False
+                leaves = list(flatten_values(parsed))
+                if not leaves:
+                    return True  # empty list/dict — nothing to require
+                return all(str(leaf).strip().lower() in actual_values for leaf in leaves)
+            return False
+
+        row_ok = all(_expected_matches(v) for v in expected.values() if v)
         if row_ok:
             passed += 1
             print("  ✓ row passed")

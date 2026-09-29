@@ -169,14 +169,18 @@ Rules:
 
                 # Basic response sanity check
                 if not response or not hasattr(response, "content"):
-                    raise PlannerAgentError("LLM returned an empty or malformed response.")
+                    raise RuntimeError("LLM returned an empty or malformed response.")
                 if not isinstance(response.content, str) or not response.content.strip():
-                    raise PlannerAgentError("LLM response content is blank.")
+                    # Transient: a reasoning model (e.g. OpenRouter's
+                    # openai/gpt-oss-120b) can non-deterministically spend
+                    # the whole max_tokens budget on hidden reasoning before
+                    # emitting content, leaving it blank. Retry like any
+                    # other Exception below instead of failing the node
+                    # outright on one unlucky sample.
+                    raise RuntimeError("LLM response content is blank.")
 
                 return response
 
-            except PlannerAgentError:
-                raise  # Don't retry on our own validation errors
             except Exception as exc:
                 last_exc = exc
                 wait = 2 ** attempt
