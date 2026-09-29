@@ -1,6 +1,7 @@
 import os
 from types import SimpleNamespace
 from groq import Groq
+from openai import OpenAI
 #from typing import Union
 from anthropic import Anthropic
 
@@ -8,7 +9,7 @@ from anthropic import Anthropic
 class ClientSingleton:
     _instance = None
     _client = None
-    _provider = 'groq'  # 'groq' | 'anthropic' | 'ollama' | 'openrouter'
+    _provider = 'openrouter'  # 'groq' | 'anthropic' | 'ollama' | 'openrouter'
     _model = "openai/gpt-oss-120b"
     # For _provider = 'ollama', set _model to whatever you've pulled, e.g.
     # "qwen2.5-coder:7b" — run `ollama pull qwen2.5-coder:7b` first, and
@@ -30,30 +31,38 @@ class ClientSingleton:
             self._instance = self()
             print("Creating new Groq client instance...")
             # This is where the client is initialized once
+            # A request whose TCP connection dies mid-flight (e.g. the
+            # machine sleeps) otherwise hangs forever with no timeout —
+            # observed as a `test_harness.py` run sitting at 0% CPU for
+            # hours with no log output after a laptop sleep/wake, requiring
+            # a manual kill. All three SDKs accept `timeout` (seconds) at
+            # construction and apply it per-request.
             if self._provider == 'groq':
                 #my_api_key = os.environ.get('GROQ_API_KEY')
                 my_api_key = os.environ.get('GROQ_API_KEY_2')
-                self._client = Groq(api_key=my_api_key)
+                self._client = Groq(api_key=my_api_key, timeout=120.0)
             elif self._provider == 'ollama':
                 # Ollama exposes an OpenAI-compatible endpoint on localhost —
                 # no API key, no rate limit, runs entirely on your own GPU.
-                # Reuses the Groq SDK purely as an OpenAI-compatible HTTP
-                # client (same request/response shape); execute() below
-                # falls through to the same chat.completions.create() path
-                # used for 'groq'. api_key is a required-but-unchecked string.
-                self._client = Groq(api_key="ollama", base_url="http://localhost:11434/v1")
+                # Uses the real `openai` SDK (not Groq's) because Groq's SDK
+                # hardcodes its request path as "/openai/v1/chat/completions"
+                # (Groq-specific), which breaks when combined with a custom
+                # base_url pointed at a different OpenAI-compatible server —
+                # it produces a wrong/doubled URL. The `openai` package
+                # correctly targets "{base_url}/chat/completions". execute()
+                # below falls through to the same chat.completions.create()
+                # path used for 'groq', since both SDKs share that interface.
+                self._client = OpenAI(api_key="ollama", base_url="http://localhost:11434/v1", timeout=120.0)
             elif self._provider == 'openrouter':
-                # Same trick as 'ollama': OpenRouter exposes an OpenAI-
-                # compatible /chat/completions endpoint that aggregates many
-                # providers/models behind one API key, so the Groq SDK works
-                # here purely as a generic OpenAI-compatible HTTP client —
-                # execute() below falls through to the same
-                # chat.completions.create() path used for 'groq'/'ollama'.
+                # Same fix as 'ollama': OpenRouter exposes a standard OpenAI-
+                # compatible /chat/completions endpoint, so it needs the real
+                # `openai` SDK rather than Groq's (see comment above — Groq's
+                # SDK hardcodes a Groq-specific request path that 404s here).
                 my_api_key = os.environ.get('OPENROUTER_API_KEY')
-                self._client = Groq(api_key=my_api_key, base_url="https://openrouter.ai/api/v1")
+                self._client = OpenAI(api_key=my_api_key, base_url="https://openrouter.ai/api/v1", timeout=120.0)
             elif self._provider == 'anthropic':
                 my_api_key = os.environ.get('ANTHROPIC_API_KEY')
-                self._client = Anthropic(api_key=my_api_key)
+                self._client = Anthropic(api_key=my_api_key, timeout=120.0)
             else:
                 raise ValueError("Invalid client name. Valid client names are groq, ollama, openrouter, and anthropic")
 
