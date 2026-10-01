@@ -128,3 +128,9 @@ ebe70dd	customer_service_sop	False	None	0.00	8791	{"agent": "CodeGeneratorAgentA
 15d4d60	video_classification_sop	True	0	0.00	66084	
 15d4d60	video_classification_sop	True	0	0.00	82421	
 15d4d60	video_classification_sop	True	0	0.00	91193	
+1977b9c	know_your_business_sop	True	0	0.61	33036	
+1977b9c	dangerous_goods_sop	False	None	0.00	0	{"agent": "PlannerAgentAgent", "type": "PlannerAgentError", "message": "LLM call failed after 3 attempts. Last error: 'NoneType' object has no attribute 'chat'"}
+1977b9c	dangerous_goods_sop	True	0	0.98	33140	
+1977b9c	dangerous_goods_sop	True	0	1.00	20020	
+1977b9c	warehouse_package_inspection_sop	True	0	1.00	24142	
+1977b9c	customer_service_sop	True	0	0.83	29832	

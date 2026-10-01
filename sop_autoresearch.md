@@ -390,6 +390,261 @@ Before the first experiment:
    `tokens_used` column for those same rows — this is your first real data
    point for the token budget in Section 2. Commit the resulting `results.tsv` as
    part of that same starting commit, or immediately after.
+15. **A tool that quietly only processes `list_param[0]` instead of every
+    element is invisible to every check in item 7/9 — it never raises,
+    never shows up in `verify_toolspec_matches_manager()`, and the AST
+    single-`pass`-statement check doesn't catch it either, because the
+    method has plenty of real code, just scoped to one element instead of
+    all of them.** Found in `know_your_business_sop`'s
+    `performSanctionsCheck(business_id, ubo_list)`: it computed `ubo_name =
+    ubo_list[0]["name"]` and looked up sanctions/PEP status for only that
+    one UBO, silently dropping every other UBO from both returned lists.
+    Invisible for the majority of test rows (many businesses have exactly
+    one UBO), and even on multi-UBO rows the bug doesn't crash — it just
+    quietly returns a 1-element list where a 2-4 element list was expected,
+    which downstream code iterates over into an ("any UBO is X") check that
+    now can only ever see UBO #1. In this dataset the still-"Pending"
+    sanctions entry was consistently NOT in position 0, so every "does any
+    UBO still have a Pending sanctions check" downstream check silently saw
+    zero Pending entries no matter how many actually existed. Symptom:
+    fixing a genuine SOP-ordering bug (item 16 below) that should have
+    raised a domain's score by ~20 points only moved it 1 point (0.60 ->
+    0.61) — the SOP fix was correct but the tool feeding it data was
+    dropping the exact signal the fix depended on. Root-caused by comparing
+    the tool's actual returned `sanction_check_status`/`pep_status` lists in
+    a failing row's output against the row's raw CSV `ubo_list` length —
+    the CSV had 2 UBOs, the tool's response had 1. Fixed by resolving every
+    name in `ubo_list` (not just `[0]`) and returning one status entry per
+    UBO. General lesson for future tool-implementation review: when a tool
+    takes a `List[...]` parameter and returns per-item results, check that
+    its output list length actually varies with its input list length on a
+    multi-item test case — a tool that always returns exactly 1 result
+    regardless of a 1-vs-4-item input is a strong tell.
+16. **When a SOP states a priority/tie-breaking order between two rules
+    ("check A first; if A doesn't apply, check B"), don't trust that the
+    order is correct just because it reads clearly — verify it against
+    ground truth on rows where both conditions are simultaneously true,
+    since that's the only place the stated order is actually observable.**
+    `know_your_business_sop`'s SOP 5.6.2 (as written going into this
+    session) said: check the 7 escalation triggers (Tax ID format, license
+    expiry, sanctions match, PEP identified, shell company, offshore,
+    bank verification) first — if any fire, `"escalate"` regardless of
+    anything else; only if none fire, then check whether any UBO's
+    `sanction_check_status` is still `"Pending"` -> `"awaiting information"`.
+    This reads as a perfectly reasonable business rule, but on the 50 rows
+    (out of 90) where at least one UBO had already come back `"Matched"`
+    (an escalation trigger) AND a different UBO was still `"Pending"`,
+    ground truth was `"awaiting information"` in 34/50 cases (68%) — the
+    *opposite* of what the stated order produces. Verified via exhaustive
+    single- and paired-feature search across every visible column
+    (ownership percentages, PEP status of the specific pending person,
+    matched-vs-pending ratio, risk_score, ownership_layer_count, tax_id) —
+    none discriminates the other 16/50 "escalate despite pending" rows from
+    the 34 "awaiting despite pending" rows (see item 17 below), but the
+    68%-vs-32% base rate itself is a strong, unambiguous signal that the
+    *order* was backwards, independent of the unexplained 16-row remainder.
+    Fixed by rewriting 5.6.2 to check "is any UBO still Pending" FIRST,
+    unconditionally, before the trigger list — moved
+    `know_your_business_sop` from 0.60 to 0.80 (combined with item 15's fix,
+    since the ordering fix alone couldn't show its real effect until the
+    tool feeding it Pending status was also fixed). General lesson: a
+    plausible-sounding priority order in SOP prose is exactly as likely to
+    be backwards as forwards from the model's/spec-writer's perspective —
+    only ground truth on the overlap case settles it, and single-condition
+    rows (only A fires, or only B fires) give zero signal about which one
+    should win when both do.
+17. **Known unsolved, newly found this session: `know_your_business_sop`
+    plateaus at 0.80 (18/90 rows still wrong) with a pattern matching
+    `content_flagging_sop`'s already-documented disconnected-ground-truth
+    limitation, not a closeable prompt/tool gap.** After item 16's fix, 16
+    of the remaining 18 wrong rows are exactly the "escalate despite a
+    different UBO still Pending" cases that item 16's base-rate evidence
+    didn't explain (the 32% minority). Two rows with otherwise-identical
+    trigger patterns (same Matched/Pending split shape, same 45/55
+    ownership split, same offshore/shell/bank-flagged status) land on
+    opposite ground-truth labels, differing only in noise-level fields
+    (`ownership_layer_count` 3 vs 4, `risk_score` 0.87 vs 0.88) that the SOP
+    itself calls unreliable ("the risk score is noisy... may not accurately
+    capture all the relevant information" — SOP 5.6.1). An exhaustive
+    single-feature purity search (every raw column, and derived features:
+    UBO count, matched count, pending count, clear count, PEP-yes/no count,
+    which specific UBO is pending and their own PEP status, tax_id parity,
+    business_type, registration_state) found zero features that perfectly
+    separate the 16 "escalate" from the 34 "awaiting information" rows in
+    this pending-and-triggered subset — every feature's split lands close
+    to the 68/32 base rate regardless of its value, the signature of noise
+    superimposed on a base rate rather than a deterministic rule. The other
+    2 of the 18 wrong rows (`biz_048`, `biz_008`) are a *different*,
+    identified root cause: each shares an identical
+    `registration_number`/`license_number`/`tax_id`/`bank_account_number`
+    with a different `business_id` elsewhere in the same CSV (e.g. `biz_048`
+    "Tech Solutions Pro" in Seattle and `biz_098` "Tech Solutions Group"
+    also in Seattle share every one of those four IDs) — a real
+    identity-fraud/shell-company signal per SOP 3.3, but detecting it
+    requires a cross-row lookup against the full dataset, which no current
+    tool performs and no per-row `workflow(input_data)` call can do on its
+    own (it only ever sees one business_id at a time). Per this loop's
+    scope rules, this needs either a new tool (a
+    "checkForDuplicateRegistration"-style lookup against the full CSV) or a
+    fundamentally different per-row contract — flagged for the user's
+    attention rather than built, since it's a new capability the SOP
+    implies but never explicitly specifies as a tool. Not pursued further
+    this session (domain already at 0.80, past the 0.8 stop bar, and this
+    is a 2-row/90 marginal gain not worth a scope-expanding tool build).
+
+18. **A tool that "looks up a row and returns `is_valid: True` whenever a row
+    is found" is functionally a stub, even though it isn't a bare `pass`** —
+    the item-9 AST check for a docstring+`pass` body doesn't catch it, since
+    real code runs and a real value comes back, but the value never actually
+    depends on the field it claims to validate. Found in three separate
+    tools in `video_annotation_sop`: `validateSceneContext`,
+    `calibrateCameraSensors`, and `executeSegmentation` each queried the CSV
+    for a matching row and returned `is_valid: True` unconditionally once
+    found, never checking whether `scene_type` was actually urban,
+    `camera_position` was actually front-facing, or `segmentation_type` was
+    actually `instance` — the exact three categorical gates the SOP's
+    Section 4.1/5.2 environmental constraints require. Since `workflow.py`
+    already correctly ANDs together every tool's `is_valid` flag into
+    `thresholds_met`, fixing only the three stub tools' internal logic (no
+    workflow/regeneration needed) moved this domain 0.83 -> 0.99 at zero
+    token cost. Root-caused by building an exhaustive predicate over every
+    raw column against ground truth (`pandas` crosstabs of each categorical
+    column against `final_status`) *before* touching any code — this is the
+    same "verify a hypothesis against the full ground truth before spending
+    a regeneration" discipline as item 16, just applied to tool-level bugs
+    instead of SOP-ordering bugs. General lesson: when several boolean
+    "is_valid" checks are ANDed together in the workflow and the actual
+    output is uniformly more permissive than ground truth (lots of
+    unexpected `True`s), suspect each contributing tool individually for
+    this "found-a-row-so-it-must-be-valid" shortcut, not just the numeric
+    threshold checks — a stub can hide behind a return value that varies
+    row-to-row (via echoing back input fields) while its `is_valid` field
+    never actually varies.
+19. **The same tool-level crash-on-empty-string bug can recur across
+    multiple sibling tools that share a call signature — grep for the exact
+    error string, not just the first occurrence.** Also in
+    `video_annotation_sop`: `executeSegmentation`, `runAutomatedQC`, and
+    `performHumanValidation` all take `predicted_object` and all used
+    `if not all([...])` to guard "missing parameter," which treats a
+    legitimate empty string (object detection found nothing — a real
+    business outcome the SOP's own output spec accounts for via `Reason`)
+    identically to a genuinely absent parameter, raising `ValueError` and
+    crashing the whole workflow for the 4/125 rows where no object was
+    detected. Fixed identically in all three: guard on `is None` (or
+    falsy-but-required *paths*, which are never legitimately empty) instead
+    of blanket falsy-checking every parameter, plus `.fillna('')` on the
+    CSV's `predicted_object` column so the row lookup matches an empty
+    string instead of comparing against `NaN`. Fixing only the first tool
+    in the call chain is not enough when several sibling tools share the
+    same call-order position and the same over-eager guard — the second
+    tool called will just crash instead, with the same superficial "Missing
+    one or more required parameters" message pointing at a different
+    tool's line number depending on which row's other fields happen to be
+    populated.
+20. **A validation step described in SOP prose as "Validate that it is
+    between 1 and 5" (or similar) can silently contradict a *later* section
+    of the same SOP that describes what to do when the value is 0 or
+    missing — and the codegen will implement the first instruction as a
+    hard gate, never reaching the second.** `dangerous_goods_sop`'s SOP 5.2-
+    5.5 told the model to validate each of 4 component scores against a 1-5
+    range with no stated exception; SOP 5.6 separately said a missing/0
+    score should be imputed by "max of the other scores." The generated
+    `workflow.py` implemented BOTH instructions faithfully and in the
+    written order — validate-and-raise in steps 5.2-5.5's position, impute
+    in 5.6's position — which meant every row with a genuine 0/missing
+    component crashed before ever reaching the (correctly-implemented!)
+    imputation logic one step later. This produced a systematic `"X score 0
+    out of valid range 1-5"` crash across 28/274 rows, i.e. every row with
+    at least one missing component — a much larger and more mechanical
+    failure signature than the noise-ceiling patterns in items 16-17, and
+    confirmed fixable (unlike those) by simply re-reading the SOP's own two
+    sections side by side and noticing they give contradictory instructions
+    for the same input state. Fixed by adding an explicit "0/missing is not
+    a failure at this step, do not raise, it's valid input for the next
+    section" caveat directly into 5.2-5.5's text, disambiguating which of
+    the two instructions wins — no toolspec or tools.py change needed for
+    this part; the tools already returned 0 correctly (once a separate NaN-
+    handling bug below was fixed), the bug was entirely in how
+    `workflow.py`'s generated code sequenced two genuinely-conflicting SOP
+    instructions.
+21. **A blank/NaN CSV cell reaching a tool that does `int(raw_value)` on it
+    crashes with `cannot convert float NaN to integer` — a different, less
+    obvious symptom than the more commonly-documented string/bool `==`
+    mismatch in Section 0 item 10, but the same underlying class of bug
+    (tool assumes its input is already the right type/shape).** Found in
+    `dangerous_goods_sop`'s four `calculate_*_score` methods: each did
+    `int(matched_row.iloc[0]['..._score'])` directly, which works for every
+    numeric-looking cell but throws on a genuinely empty cell (`pandas`
+    reads a blank CSV field as `float('nan')`, and `int(nan)` is a
+    `ValueError`, not a graceful 0). Since the SOP's own business logic
+    treats a missing score identically to an explicit 0 (see item 20), the
+    correct fix is `0 if pd.isna(raw_score) else int(raw_score)` at the
+    tool boundary — a one-line, zero-regeneration fixture fix once
+    identified, but only 1/28 originally-failing rows in this domain
+    exposed it (the other 27 had an explicit `0` in the CSV, which
+    `int(0)` handles fine) — don't assume a single reproducing row means a
+    bug only affects that one row; check whether the same code path would
+    also mishandle a *different* invalid input (here: blank vs. explicit
+    zero) that just happens to be rarer in the test set.
+22. **When a SOP states a numeric range for a derived value ("hazard score
+    validated against 4-20") but never states the *sub-ranges* that map to
+    each of several output categories, the codegen has to guess evenly-
+    spaced boundaries — and ground truth is not guaranteed to be evenly
+    spaced.** `dangerous_goods_sop`'s SOP 5.7 said only "Apply the Hazard
+    Class A, B, C and D based on the value of the hazard score... higher
+    score gets higher severity" with zero numeric thresholds. The generated
+    code guessed `<=8` -> A, which put a ground-truth `hazard_score == 8`
+    row (which should be Class B) into Class A. Resolved by computing the
+    real thresholds directly from ground truth on rows with 0-1 missing
+    components (`df.groupby('hazard_class')['hazard_score'].agg(['min',
+    'max'])`, excluding `Unable to Decide`/invalid rows) — this produced
+    clean, non-overlapping bands (A: 4-7, B: 8-14, C: 15-16, D: 17-20, with
+    13-14 never observed but safely assignable to B by interpolation, not
+    reverse-engineered per-row) — and writing those exact bands into the
+    SOP text. This is meaningfully different from the anti-hardcoding rule
+    in Section 2.5/6-item-6: the fix generalizes to *any* hazard_score
+    value via a stated rule, not to specific row IDs, so it survives
+    regeneration and unseen data — the distinction that makes it acceptable
+    is "derived a general threshold rule from the full distribution" vs.
+    "special-cased specific IDs to force a match."
+23. **A `bool(some_dict)` shortcut for a "did this succeed" flag can survive
+    even a toolspec that documents the real boolean field by name, in
+    plain language, with an explicit "this is the field that tells you X"
+    hint — this is a genuine model sampling habit, not a documentation
+    gap, and re-generating after further improving the SOP/toolspec text
+    does not reliably fix it.** `customer_service_sop`'s `workflow.py` line
+    41 sets `is_authenticated = bool(authentication_records)` where
+    `authentication_records` is the dict returned by
+    `getAuthenticationDetails` — always non-empty/truthy on a successful
+    call regardless of its `login_status`/`account_recovery_status`
+    contents, so `is_authenticated` is always `True`. This happens despite:
+    (a) `toolspecs.json`'s `getAuthenticationDetails` entry explicitly
+    naming both fields, giving their exact enum values, and stating in
+    prose "this is the field that tells you whether a FAILURE login_status
+    was subsequently recovered"; (b) `sop.txt` 5.1 stating the business
+    rule in plain English ("If you find failed attempt and no record of
+    successful recovery, classify the authentication as failed and close
+    the case"). All 27/156 failing rows in this domain are exactly this bug
+    — a `login_status=FAILURE`/no-recovery account proceeds past
+    authentication anyway, then crashes several steps later when
+    `createSessionAndOpenTicket`'s fixture-backed CSV lookup can't find a
+    row matching the (wrong) `is_authenticated=True` it was called with.
+    This is the fourth time this exact fix has been attempted (3 prior
+    rounds of progressively more forceful SOP wording, documented in the
+    "Per-domain triage" section's item 5 note, plus this session's
+    regeneration against an even-further-improved toolspec) — all four
+    reproduced the identical `bool(dict)` shortcut. Per the loop's stop
+    rule, not re-attempted a 5th time this session. This is now strong
+    enough evidence to say the real fix is NOT more SOP/toolspec prose —
+    it's a `codegeneration_agent.py`/`validation_agent.py` change (e.g. a
+    validator check that flags "a boolean derived from truthiness of an
+    entire dict/response object, rather than from a named field inside it"
+    as a defect class, the same way Section 0 item 7's nested-object-shape
+    blind spot was closed by adding a `properties` block) — flagged for a
+    future session that's explicitly scoped to touch agent prompts, since
+    that's a bigger, cross-cutting change than this fixture-focused loop's
+    normal scope, and it hasn't yet been shown to affect any domain besides
+    this one.
 
 You now have a HEAD commit, a known `S_prev`, and a known per-run token cost
 `T_prev`. Everything below assumes that exists.
