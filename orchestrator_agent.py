@@ -1,5 +1,6 @@
 import json
 import logging
+import difflib
 from typing import Literal
 from sop_state import SOPConverterState
 
@@ -103,21 +104,133 @@ class OrchestratorAgent:
                 issues=unrecoverable,
             )
 
-        # ── 6. RETRY WITH FEEDBACK ────────────────────────────────────────────
+        # ── 6. RETRY — CHOOSE TARGET ──────────────────────────────────────────
+        # Default target is the generator (the only behavior that existed
+        # before this escalation logic). Escalate to schema or planner only
+        # when the SAME high/critical issue already survived one generator-
+        # only retry — i.e. codegen already had its shot at this exact issue
+        # and didn't fix it, which is evidence the problem lives upstream
+        # (a wrong/missing schema field, or a wrong plan) rather than in how
+        # the code was written.
         feedback = self._build_feedback(issues, suggestions, severity_report)
-        state["retry_feedback"] = feedback      # CodeGeneratorAgent can read this
-        state["retry_count"]    = retry_count + 1
+        retry_target, escalation_reason = self._choose_retry_target(
+            state, issues, severity_report
+        )
+
+        state["retry_feedback"]    = feedback   # CodeGeneratorAgent/SchemaAgent/PlannerAgent can read this
+        state["retry_count"]       = retry_count + 1
+        state["retry_target"]      = retry_target
+        state["last_retry_target"] = retry_target
+        state.setdefault("issue_history", []).append(list(issues))
+
+        if retry_target == "planner":
+            # Snapshot the plan that led to this escalation so PlanDiffChecker
+            # can tell, after PlannerAgent re-runs, whether anything actually
+            # changed before spending tokens on schema/codegen/validator again.
+            state["previous_api_plan"] = state.get("api_plan")
+            state["plan_retries"] = state.get("plan_retries", 0) + 1
+        elif retry_target == "schema":
+            state["schema_retries"] = state.get("schema_retries", 0) + 1
+
+        print(f"  Escalation   : {escalation_reason}")
 
         return self._decide(
             state,
             status="retry",
             reason=(
                 f"Recoverable issues found (severity={severity_report['label']}). "
-                f"Attempt {retry_count + 1}/{max_retries}."
+                f"Attempt {retry_count + 1}/{max_retries}. {escalation_reason}"
             ),
             retry_count=retry_count + 1,
             issues=issues,
+            retry_target=retry_target,
         )
+
+    # =========================================================================
+    # ESCALATION TARGET SELECTION
+    # =========================================================================
+
+    # Keyword heuristics for classifying a validation issue's likely root
+    # cause, same style/spirit as SEVERITY_WEIGHTS' keyword classification.
+    PLAN_SHAPE_KEYWORDS = [
+        "wrong tool", "missing step", "step order", "tool name",
+        "out of order", "skipped step", "wrong sequence", "extra step",
+        "steps are missing",
+    ]
+    SCHEMA_SHAPE_KEYWORDS = [
+        "parameter", "input_data", "missing field", "input schema",
+        "schema", "required param",
+    ]
+
+    def _choose_retry_target(
+        self,
+        state: SOPConverterState,
+        issues: list[str],
+        severity_report: dict,
+    ) -> tuple[str, str]:
+        """Decide whether this retry should target generator, schema, or planner."""
+
+        last_target = state.get("last_retry_target")
+        history = state.get("issue_history", [])
+        max_plan_retries = state.get("max_plan_retries", 1)
+        max_schema_retries = state.get("max_schema_retries", 1)
+
+        persisted = (
+            last_target == "generator"
+            and bool(history)
+            and self._issues_persisted(issues, history[-1])
+        )
+
+        if not persisted:
+            return "generator", "First attempt at this issue — retrying codegen."
+
+        top_issue = self._top_issue(issues, severity_report)
+        shape = self._classify_issue_shape(top_issue)
+
+        if shape == "plan" and state.get("plan_retries", 0) < max_plan_retries:
+            return (
+                "planner",
+                f"Issue persisted through a codegen retry and looks "
+                f"plan-shaped ('{top_issue}') — escalating to planner.",
+            )
+        if shape == "schema" and state.get("schema_retries", 0) < max_schema_retries:
+            return (
+                "schema",
+                f"Issue persisted through a codegen retry and looks "
+                f"schema-shaped ('{top_issue}') — escalating to schema.",
+            )
+
+        return (
+            "generator",
+            "Issue persisted but is code-shaped (or escalation budget "
+            "already spent) — retrying codegen again.",
+        )
+
+    def _issues_persisted(self, current_issues: list[str], previous_issues: list[str]) -> bool:
+        """True if any current issue closely resembles any issue from last round."""
+        if not current_issues or not previous_issues:
+            return False
+        for cur in current_issues:
+            for prev in previous_issues:
+                if difflib.SequenceMatcher(None, cur.lower(), prev.lower()).ratio() > 0.6:
+                    return True
+        return False
+
+    def _top_issue(self, issues: list[str], severity_report: dict) -> str:
+        """The most severe issue string, for shape classification."""
+        for item in severity_report["classified"]:
+            if item["severity"] in ("critical", "high"):
+                return item["issue"]
+        return issues[0] if issues else ""
+
+    def _classify_issue_shape(self, issue_text: str) -> str:
+        """Heuristic: does this issue look plan-shaped, schema-shaped, or code-shaped?"""
+        text = issue_text.lower()
+        if any(kw in text for kw in self.PLAN_SHAPE_KEYWORDS):
+            return "plan"
+        if any(kw in text for kw in self.SCHEMA_SHAPE_KEYWORDS):
+            return "schema"
+        return "code"
 
     # =========================================================================
     # INPUT GUARDRAILS
@@ -256,18 +369,21 @@ class OrchestratorAgent:
         reason: str,
         retry_count: int,
         issues: list[str] | None = None,
+        retry_target: str | None = None,
     ) -> SOPConverterState:
         """Write the orchestrator decision to state and print it."""
 
         decision = {
-            "status":      status,
-            "reason":      reason,
-            "retry_count": retry_count,
-            "issues":      issues or [],
+            "status":       status,
+            "reason":       reason,
+            "retry_count":  retry_count,
+            "issues":       issues or [],
+            "retry_target": retry_target,
         }
 
-        state["status"]               = status
+        state["status"]                = status
         state["orchestrator_decision"] = decision
+        state["retry_target"]          = retry_target
 
         icon = {"complete": "✅", "retry": "🔄", "failed": "❌"}.get(status, "❓")
         print(f"\n  Decision: {icon} {status.upper()}")

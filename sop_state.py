@@ -21,3 +21,15 @@ class SOPConverterState(TypedDict):
     max_retries: int
     error: str
     status: str  # "planning", "generating", "validating", "complete", "failed"
+
+    # Escalation routing (orchestrator may route a retry to generator,
+    # schema, or planner instead of always regenerating code)
+    retry_target: str          # "generator" | "schema" | "planner" | None
+    last_retry_target: str     # what the previous retry targeted, for persistence detection
+    issue_history: list        # one entry per orchestrator pass: that round's validation issues
+    plan_retries: int
+    schema_retries: int
+    max_plan_retries: int
+    max_schema_retries: int
+    previous_api_plan: list    # snapshot taken right before a planner-escalation retry
+    plan_diff_status: str      # "n/a" | "changed" | "unchanged" — set by PlanDiffChecker

@@ -110,6 +110,27 @@ class PlannerAgent:
     # =========================================================================
 
     def _build_prompt(self, state: SOPConverterState) -> str:
+        # OrchestratorAgent sets retry_feedback (and escalates the graph back
+        # to this agent specifically) only when a validation issue survived a
+        # generator-only retry unchanged AND looks plan-shaped (wrong tool,
+        # missing/extra step, wrong order) — i.e. evidence the PLAN itself is
+        # the problem, not how codegen implemented it.
+        feedback_section = ""
+        retry_feedback = state.get("retry_feedback")
+        if retry_feedback:
+            previous_plan = state.get("api_plan") or []
+            feedback_section = f"""
+
+RETRY — A VALIDATION ISSUE PERSISTED THROUGH A CODE-GENERATION RETRY,
+SUGGESTING THE PLAN ITSELF (not the generated code) IS THE PROBLEM:
+{retry_feedback}
+
+Your previous plan (don't just resubmit this unchanged — reconsider the
+tool choice, step order, or whether a step is missing or shouldn't be
+there, based on the issue above):
+{json.dumps(previous_plan, indent=2)}
+"""
+
         return f"""You are a workflow planning expert. Analyze this SOP and create an execution plan.
 
 SOP:
@@ -117,7 +138,7 @@ SOP:
 
 Available Tools:
 {state['tools_formatted']}
-
+{feedback_section}
 Create a step-by-step API execution plan — a plan of TOOL CALLS, not a
 transcription of every sentence in the SOP. For each step:
 1. Identify a task that requires calling one of the Available Tools

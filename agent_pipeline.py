@@ -21,6 +21,7 @@ from schema_agent import SchemaAgent, SchemaAgentError
 from codegeneration_agent import CodeGeneratorAgent, CodeGeneratorAgentError
 from validation_agent import ValidatorAgent, ValidatorAgentError
 from orchestrator_agent import OrchestratorAgent, OrchestratorError
+from plan_diff_checker import PlanDiffChecker
 from sop_state import SOPConverterState
 import logging
 logger = logging.getLogger(__name__)
@@ -40,10 +41,16 @@ AGENT_EXCEPTIONS = (
 # ROUTING FUNCTION
 # ============================================================================
 
-def should_retry(state: SOPConverterState) -> Literal["retry", "complete", "failed"]:
+def should_retry(
+    state: SOPConverterState,
+) -> Literal["retry_generator", "retry_schema", "retry_planner", "complete", "failed"]:
     """
     Routing function for LangGraph edge.
     Reads the status set by OrchestratorAgent and directs the graph accordingly.
+    A "retry" status also carries retry_target ("generator"/"schema"/"planner"),
+    set by OrchestratorAgent._choose_retry_target — most retries still target
+    the generator (today's only behavior); schema/planner are escalations for
+    a validation issue that survived a generator-only retry unchanged.
     """
     status = state.get("status", "")
     decision = state.get("orchestrator_decision", {})
@@ -57,10 +64,19 @@ def should_retry(state: SOPConverterState) -> Literal["retry", "complete", "fail
     elif status == "failed":
         return "failed"
     elif status == "retry":
-        return "retry"
+        target = state.get("retry_target") or "generator"
+        if target not in ("generator", "schema", "planner"):
+            logger.warning(f"Router: unrecognised retry_target '{target}' — defaulting to generator.")
+            target = "generator"
+        return f"retry_{target}"
     else:
         logger.warning(f"Router: Unrecognised status '{status}' — defaulting to failed.")
         return "failed"
+
+
+def after_plan_diff(state: SOPConverterState) -> Literal["continue", "failed"]:
+    """Routing function for the edge out of PlanDiffChecker."""
+    return "failed" if state.get("plan_diff_status") == "unchanged" else "continue"
 
 # ============================================================================
 # LANGGRAPH WORKFLOW DEFINITION
@@ -79,42 +95,61 @@ class SOPToCodeConverter:
         self.code_generator = CodeGeneratorAgent()
         self.validator = ValidatorAgent()
         self.orchestrator = OrchestratorAgent()
-        
+        self.plan_diff_checker = PlanDiffChecker()
+
         # Build graph
         self.graph = self._build_graph()
-    
+
     def _build_graph(self) -> StateGraph:
         """
         Build the LangGraph state graph
         """
         # Create graph
         workflow = StateGraph(SOPConverterState)
-        
+
         # Add nodes (agents)
         workflow.add_node("planner", self.planner)
+        workflow.add_node("plan_diff_check", self.plan_diff_checker)
         workflow.add_node("schema", self.schema_agent)
         workflow.add_node("generator", self.code_generator)
         workflow.add_node("validator", self.validator)
         workflow.add_node("orchestrator", self.orchestrator)
-        
+
         # Define edges (workflow)
         workflow.set_entry_point("planner")
-        workflow.add_edge("planner", "schema")
+        # plan_diff_check is a pure pass-through except right after a
+        # planner-escalation retry (see PlanDiffChecker) — it sits on every
+        # planner->schema transition, not just the escalation path, because
+        # the graph edge out of "planner" is the same node every time the
+        # graph re-enters it.
+        workflow.add_edge("planner", "plan_diff_check")
+        workflow.add_conditional_edges(
+            "plan_diff_check",
+            after_plan_diff,
+            {
+                "continue": "schema",
+                "failed": END,
+            }
+        )
         workflow.add_edge("schema", "generator")
         workflow.add_edge("generator", "validator")
         workflow.add_edge("validator", "orchestrator")
 
-       # Conditional routing from orchestrator
+       # Conditional routing from orchestrator — most retries still target
+       # the generator (today's only behavior); schema/planner are
+       # escalations (see OrchestratorAgent._choose_retry_target).
         workflow.add_conditional_edges(
             "orchestrator",
             should_retry,
             {
-                "retry": "generator",      # Go back to generator
-                "complete": END,           # Success - end workflow
-                "failed": END              # Max retries - end workflow
+                "retry_generator": "generator",
+                "retry_schema":    "schema",
+                "retry_planner":   "planner",
+                "complete":        END,
+                "failed":          END,
             }
         )
-        
+
         #return workflow.compile(checkpointer=memory)
         return workflow.compile()
     
@@ -146,7 +181,17 @@ class SOPToCodeConverter:
             "error": "",
             "max_retries" : 3,
             "retry_count" : 0,
-            "status" : "planning"            
+            "status" : "planning",
+            # Escalation routing state (see OrchestratorAgent/PlanDiffChecker)
+            "retry_target": None,
+            "last_retry_target": None,
+            "issue_history": [],
+            "plan_retries": 0,
+            "schema_retries": 0,
+            "max_plan_retries": 1,
+            "max_schema_retries": 1,
+            "previous_api_plan": None,
+            "plan_diff_status": "",
         }
         
         # Run the graph

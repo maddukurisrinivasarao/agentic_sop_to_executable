@@ -175,6 +175,25 @@ Check ALL of the following:
 9. No dangerous calls: eval, exec, os.system, subprocess, open, __import__
 10. No imports other than get_manager_instance from global_tool_functions
 11. Logical execution order matches the SOP dependencies
+12. For every boolean/status output field whose value must come from a tool
+    call's documented Returns/outputSchema (e.g. a named field like
+    `login_status`, `account_recovery_status`, `is_valid`, `status`),
+    verify the code actually reads that NAMED field — not a substitute for
+    it. Red flags to check for and flag as an issue if found: (a) a
+    truthiness test on the entire response object instead of a field inside
+    it (`bool(some_response)` / `if some_response:` is always true for any
+    non-empty dict, regardless of what's inside); (b) the variable is set
+    equal to, or copied from, an unrelated prior variable instead of the
+    current tool call's own return value; (c) a hardcoded/assumed value
+    accompanied by a comment like "assume", "simplify", "for now", "not
+    explicitly detailed/documented", or similar, when the tool's Returns
+    shape actually documents the needed field. Any of these three patterns
+    is a defect even if the Available Tools section above clearly documents
+    the real field with its own name and enum/examples — that documentation
+    being ignored is exactly the bug this check exists to catch, not
+    evidence the check doesn't apply. If found, flag it in "issues" and
+    supply "corrected_code" that reads the actual named field(s) and applies
+    whatever decision rule the SOP/task states for that field.
 
 Return ONLY a JSON object with this exact schema:
 {{

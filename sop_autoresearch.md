@@ -645,6 +645,290 @@ Before the first experiment:
     that's a bigger, cross-cutting change than this fixture-focused loop's
     normal scope, and it hasn't yet been shown to affect any domain besides
     this one.
+24. **A credential gap in the running environment blocks regeneration
+    entirely, and is a different failure mode from every bucket 1-5 in the
+    debug loop — check for it before concluding anything about a bug's
+    persistence.** A 2026-10-01 session, tasked with a focused 5th
+    regeneration attempt on `customer_service_sop` specifically to test
+    whether item 23's `bool(dict)` bug was finally fixed by
+    `codegeneration_agent.py` rules 24/25 (the "never substitute bool(dict)
+    for a named-field check" / "a non-empty object is always truthy" rules)
+    plus a new, still-uncommitted orchestrator plan/schema/code escalation
+    mechanism (`orchestrator_agent.py`'s `_classify_issue_shape`), found
+    `client.py`'s configured provider (`_provider = 'openrouter'`) had no
+    matching `OPENROUTER_API_KEY` (nor `ANTHROPIC_API_KEY`) in the shell
+    environment — only `GROQ_API_KEY`/`GROQ_API_KEY_2` were present. Every
+    LLM call failed immediately ("Missing credentials" on attempt 1, then
+    `'NoneType' object has no attribute 'chat'` on retries once the client
+    singleton cached a `None` client). **No regeneration ran, the provider
+    was deliberately not switched to `groq` as a workaround** (that's an
+    infra/credentials decision belonging to the user, not a fixture fix —
+    and it would confound any before/after comparison with the prior 4
+    documented `openrouter` attempts by changing the model entirely). The
+    score stayed at the previously-verified 0.83/156 (re-confirmed via
+    `--test`, free, cached `workflow.py` byte-identical to the prior
+    session's). This is now logged as a precondition check for any future
+    attempt on this domain (or any domain): **verify `echo
+    $OPENROUTER_API_KEY` (or whichever provider `client.py._provider`
+    currently names) is actually set before spending a session's first
+    action on a regeneration**, since a credential gap produces a
+    `completed=False row_pass_rate=0.00` result that looks superficially
+    like a new pipeline failure but is actually just unrelated
+    infrastructure, not a reproduction of (or a fix for) the bug under
+    test — don't let a `results.tsv` row like this be misread as "the bug
+    got worse."
+    - **Zero-cost secondary finding, made purely by re-reading
+      `validation_agent.py`'s prompt (no LLM call needed):** its 11-item
+      "Check ALL of the following" checklist in `_build_prompt` (tool
+      selection, call syntax, parameter names/required-ness, `input_data`
+      key scope, try/except shape, function signature, first import line,
+      banned calls, import scope, step ordering) has **no item that would
+      ever flag a boolean/status field derived from a whole-object
+      truthiness check instead of a named field inside it** — i.e. the
+      validator's own review criteria cannot catch item 23's bug even in
+      principle, independent of whether codegen's rules 24/25 succeed or
+      fail on a given sample. This means the validator provides no
+      second-line-of-defense for this defect class, and the new
+      orchestrator escalation logic (which only acts on issues the
+      validator actually raises in its `issues` list) never gets a chance
+      to engage either, since nothing gets flagged to escalate.
+      **Recommended fix (NOT applied this session — untestable without
+      working credentials, and `validation_agent.py` is a shared
+      cross-domain prompt, so confidence requires being able to verify no
+      regressions on other domains, which this session couldn't do at
+      all):** add a 12th checklist item mirroring codegen rules 24/25's
+      exact language: *"No boolean/status field is derived via
+      `bool(<entire dict/object returned by a tool call>)` or a bare `if
+      <that dict>:` truthiness test when the tool's documented Returns
+      shape names a specific status/outcome field inside that object —
+      flag this as an issue and supply `corrected_code` that checks the
+      named field(s) instead."* Since this is a genuine code-shaped defect
+      (not plan- or schema-shaped), it would correctly fall through to
+      `_classify_issue_shape`'s existing "code" default — no change needed
+      to `PLAN_SHAPE_KEYWORDS`/`SCHEMA_SHAPE_KEYWORDS` for this specific
+      fix to route correctly. Next session with working
+      `OPENROUTER_API_KEY`/`ANTHROPIC_API_KEY` should apply this checklist
+      addition, then run the regeneration this session couldn't, then
+      `--test` to confirm, before concluding anything new about whether
+      the bug is finally fixed.
+
+25. **A validator-side checklist item that targets a specific codegen defect
+    class is itself a non-deterministic LLM judgment, not a static
+    analyzer — it measurably reduces the bug's rate but does not reliably
+    catch it on every sample, even on the exact run where it's needed.**
+    Follow-up to item 24: with `OPENROUTER_API_KEY` working, ran the 5th and
+    6th regenerations of `customer_service_sop` this session (2026-10-01).
+    Regen 5 (codegen rules 24/25 active, no validator change): the literal
+    `is_authenticated = bool(authentication_records)` pattern from item 23
+    was gone — rules 24/25 did suppress that exact surface form — but it was
+    replaced by `is_authenticated = is_account_id_valid` with a comment
+    reading `# Authentication outcome not explicitly detailed; assume
+    success if ID valid`, which never references the `getAuthenticationDetails`
+    response at all and directly violates rule 24's explicit ban on
+    "assume"/"simplify" rationales anyway. Score moved 0.83 -> 0.88 (156
+    rows) — an improvement, since this variant only breaks the subset of
+    rows with `login_status=FAILURE`/no recovery (17/18 failures), vs. the
+    original bug breaking all auth-failure rows identically, but the same
+    underlying defect class. Added `validation_agent.py` checklist item 12
+    in response — broadened past the narrower draft recommended in item 24
+    (which only named `bool(<dict>)`/truthiness) to also flag "value copied
+    from an unrelated prior variable" and "hardcoded/assumed value with an
+    'assume'/'simplify'/'for now'/'not explicitly detailed' comment", since
+    regen 5's actual bug would have slipped past the narrower wording.
+    Verified zero regression on all 6 domains at/above 0.8 via `--test`
+    (prompt-only change, no cached `workflow.py` touched). Regen 6 (both
+    codegen rules 24/25 AND the new validator item 12 active): **item 12
+    did fire correctly on one retry** — the validator's issues list read
+    *"The code assumes authentication succeeded by hard-coding
+    `is_authenticated = True` instead of reading a value from the
+    `getAuthenticationDetails` response..."*, exactly the defect class it
+    was written for, and a correction was accepted — but on a **later**
+    retry within the same run (triggered by an unrelated missing-step issue,
+    `checkPaymentStatus`, that dominated the validator's attention that
+    pass), the finally-accepted code reverted all the way back to the
+    original `is_authenticated = bool(auth_records)` pattern, completely
+    unflagged by item 12 that pass. Net score: back down to 0.83 (156 rows),
+    erasing regen 5's gain. **Lesson for any future validator-checklist
+    fix attempting to backstop a codegen sampling habit**: adding the check
+    is still worth doing (it's a real, demonstrated, zero-regression
+    improvement in the bug's hit rate — it caught the bug at least once,
+    live, when it would previously have had no chance to), but don't expect
+    a single checklist item to fully close a sampling-habit gap, because the
+    validator's own issue-detection is sampled independently per retry and
+    can simply fail to notice the targeted defect on whatever retry happens
+    to produce the code that gets accepted, especially when a different,
+    more salient issue is competing for the same single-pass review. A more
+    reliable fix likely needs something outside prompt engineering
+    entirely — e.g. a deterministic static check (grep/AST pattern match
+    for `bool(<tool_response_variable>)` or an output boolean assigned from
+    a variable that was never the return value of its own corresponding
+    tool call) run unconditionally on every generated/corrected code
+    candidate before acceptance, independent of whether the LLM validator's
+    own judgment happens to notice it that pass. Not built this session —
+    flagged for the user as a possible structural pipeline change (new
+    capability: a non-LLM linting pass in the orchestrator or validator
+    loop), out of scope for a single-domain fixture/prompt debugging pass.
+    Current state: `validation_agent.py` item 12 is kept (net positive,
+    confirmed harmless elsewhere); `customer_service_sop`'s cached
+    `workflow.py` is regen 6's output, re-verified at **0.83/156 via
+    `--test`**. Not re-attempted a 7th time this session per the stop rule
+    (this was the 6th total regeneration across sessions, 2 of them this
+    session, already using the "one extra attempt for an evidence-backed
+    hypothesis" allowance).
+
+26. **Before concluding a recurring bug is a model-reliability/sampling
+    problem, verify the model actually received the information it's
+    supposedly ignoring — trace the literal rendered prompt text, not just
+    the source toolspec file.** Items 23-25 all concluded `customer_service_sop`'s
+    `is_authenticated` bug was a `codegeneration_agent.py` sampling habit,
+    reasoning that the SOP and `toolspecs.json` were "already maximally
+    explicit." That premise was wrong in a specific, checkable way: the
+    *source file* `toolspecs.json` is fully explicit (nested `properties`
+    with `login_status`/`account_recovery_status` and exact enum values,
+    one level inside the `"authentication records"` Returns field) — but
+    `tools_helper.py`'s `load_tools_from_toolspec_json()` only walked the
+    TOP level of `outputSchema.properties`. For a Returns field documented
+    as a nested object, it captured only that field's own `type`/
+    `description` and silently dropped everything inside its own
+    `properties` — so the rendered prompt every agent actually received
+    was `Returns: {'authentication records': {'type': 'object',
+    'description': "...exactly these keys..."}}`, with the real field names
+    never appearing anywhere. Confirmed by literally calling
+    `format_tools_for_llm()` on this domain's loaded tools and reading the
+    output, rather than re-reading `toolspecs.json` directly (which is what
+    every prior session had done, and which looks fully correct in
+    isolation). The only reason any prior regeneration ever produced
+    `login_status`-shaped code at all was a prompt engineer's worked example
+    in codegen rule 24 that happened to spell those field names out
+    literally, as an aside about a different illustrative scenario — an
+    out-of-band leak the model couldn't distinguish from a generic example,
+    which is exactly why it was unreliable (sometimes used, sometimes not,
+    looking like non-deterministic sampling when the real issue was "this
+    is the only place the real schema exists, and nothing marks it as
+    authoritative for this specific tool").
+
+    **Fix**: `tools_helper.py`'s `load_tools_from_toolspec_json()` now
+    recursively extracts a nested object's own `properties`
+    (`_extract_schema_fields`), and `format_tools_for_llm()` renders them
+    with their FULL bracket access chain relative to the tool's raw
+    response via `_render_returns` (e.g.
+    `['authentication records']['login_status']`), not just visual
+    indentation. Indentation alone was tried first and is NOT sufficient:
+    with the real field name now visible but only indented under its
+    parent, codegen correctly wrote `login_status = auth_res["login_status"]`
+    (right field name, flattened access) and crashed with `KeyError:
+    'login_status'` at runtime (0.11/156) — a code generator needs the
+    literal key chain spelled out, not a visual nesting cue, to know which
+    intermediate dict keys are required.
+
+    **Also confirmed** (as a controlled, if accidental, experiment): with
+    nested fields still hidden and the domain-specific codegen-rule example
+    removed per an explicit request to keep CRITICAL REQUIREMENTS
+    domain-general, the model had zero grounding anywhere and invented a
+    fictional field (`is_authenticated = auth_records.get("authenticated",
+    False)`), scoring 0.36/156 — direct evidence that the domain-specific
+    example in the old rule 24 was load-bearing *because* it was the only
+    place the real schema leaked through, not because the general principle
+    needed a domain-specific illustration to be understood.
+
+    Result: `customer_service_sop` 0.83 -> **0.96/156**, clearing the 0.95
+    bar after 6 failed regeneration attempts across multiple sessions. This
+    is a domain-general infrastructure fix (any domain with a nested-object
+    Returns shape was equally affected — `warehouse_package_inspection_sop`
+    also has one, re-verified unchanged at 1.00/150 afterward). Verified
+    zero regression by statically rendering all 10 domains' `toolspecs.json`
+    through the new code (the only way to exercise `tools_helper.py` without
+    a live LLM call — `--test` never touches it) plus `--test` re-scoring
+    every other domain. Remaining ~4% (6/156 rows) is a different, narrower,
+    pre-existing fixture issue: `service_metrics` in `tools.py` is parsed
+    from a raw per-row JSON string in the CSV, and a handful of rows' JSON
+    doesn't contain a `latency` key at all — unrelated to this fix, not
+    pursued since the domain is already past target.
+
+    **General lesson for future debugging**: "the SOP/toolspec is already
+    maximally explicit" is a claim about a source file, not about what an
+    LLM agent actually sees. Before accepting that premise (especially
+    across repeated failed regenerations, where it's tempting to conclude
+    "we've tried everything"), render the actual prompt text a real
+    pipeline run would send and read it directly — the gap can be in the
+    rendering/loading code between the documented source and the model's
+    context window, which no amount of re-reading the source file, or
+    rewording the SOP/prompt around it, will ever surface.
+
+27. **`--test` cannot catch a regression in shared prompt-building code —
+    only a real regeneration can, because `--test` never calls `tools_helper.py`
+    or any agent's `_build_prompt`.** After item 26's `tools_helper.py` fix,
+    regenerated every domain except the two structural dead-ends as a genuine
+    end-to-end check (not just `--test`). 6/8 held steady. 2 didn't, and both
+    led to real findings `--test` alone could never have surfaced, since it
+    only re-scores already-cached code.
+
+    `customer_service_sop` (0.96 -> 1.00 after passing through 0.36 and 0.77):
+    a fresh regeneration hit two MORE bugs beyond item 26's fix, both isolated
+    by wrapping every manager method with a print/trace instrumentation layer
+    and running one real failing row through it end-to-end, rather than
+    guessing from harness input/output diffs (essential here — two different
+    bugs both produced the identical generic error "No record found for the
+    provided parameters", which could have come from any of five different
+    tool calls). (1) `account_suspension_status`'s toolspec enum listed only
+    `["ACTIVE","SUSPENDED"]`, never documenting that empty-string means "no
+    suspension on record" (132/156 rows) — fixed the enum/description to name
+    all three states. (2) The SOP said "re-execute diagnostics" for
+    post-troubleshooting metrics, but confirmed via direct instrumentation
+    that the diagnostics tool is a static lookup returning IDENTICAL numbers
+    on a second call — the real updated metrics only exist in
+    `executeTroubleshooting`'s own return field; added an explicit SOP
+    sentence naming this, since the SOP's own prose literally recommended the
+    wrong tool call. (3) Even after fixing that, the code computed a correct
+    threshold check into an unused variable (`issue_fixed`) and a WRONG
+    relative-decrease formula into the actual output field
+    (`metrics_improved_post_troubleshooting`) — the SOP's output example
+    named the field but its prose never said it WAS the "classify as fixed"
+    threshold check already described two sentences earlier. Added an
+    explicit bridging sentence with a concrete counterexample (500ms->150ms
+    still counts as "not improved" since 150 exceeds the 100ms threshold).
+    Each of these three was a completely different bug from the one item 26
+    fixed and from each other — this domain alone has now needed a
+    toolspec-rendering fix (item 26), a toolspec-enum completeness fix, and
+    two separate SOP-prose-to-output-field bridging fixes, across 8 total
+    regeneration attempts, before reaching its first-ever 1.00.
+
+    `email_intent_sop` (0.95 -> 0.00 -> 0.92): first regen hit ordinary
+    sampling variance on the already-documented "unable to decide"
+    overuse (item unchanged from prior session's finding) — added an
+    implementation note to the SOP flipping which category is the structural
+    fallback. Second regen: **0.00**, a universal `KeyError: 'include_history'`
+    crashing every row identically. Root cause: `schema_agent.py`'s
+    `_compute_parameter_checklist()` lumped every tool parameter — required
+    AND optional — into one list the prompt forces into a binary
+    classification ("covered by an earlier return" or "a base-level input"),
+    with no third option for "optional, has its own documented default, just
+    omit it." `include_history` (optional, `default: false`, never mentioned
+    in the SOP at all) got wrongly promoted to a required `input_schema`
+    field with no corresponding real CSV column. **This is a genuine
+    domain-general gap** — any domain with an optional/defaulted tool
+    parameter could hit it, not unique to this domain's wording — fixed by
+    splitting the checklist using `required`/`default` metadata the toolspec
+    already provides (added `default` capture to `tools_helper.py`'s
+    parameter extraction too). Verified against all 10 domains' real
+    toolspecs before the next regeneration (zero cost). Third regen:
+    0.92/186, both issues resolved, landing exactly at this domain's
+    pre-existing documented ceiling (the `product_id`+`marketplace_id`
+    duplicate-key collision, needs a new tool parameter, unrelated to
+    anything fixed this session) — not a regression from today's work, the
+    same ceiling found before this pass.
+
+    **General lesson**: treat a `--test`-only regression suite as validating
+    "did I break the cached-code scoring path," never "did I break shared
+    prompt-building code" — the latter requires spending at least one real
+    regeneration per domain whose prompt-building path actually changed.
+    `_compute_parameter_checklist()`-style deterministic checklists (the
+    exact fix that solved the item-9 tool-count-scaling problem) need the
+    same "is this list complete AND correctly partitioned" scrutiny as any
+    other piece of logic — a checklist that's complete but miscategorized
+    (every parameter present, but required and optional lumped together) can
+    still cause a universal crash, for a different reason than an incomplete
+    one would.
 
 You now have a HEAD commit, a known `S_prev`, and a known per-run token cost
 `T_prev`. Everything below assumes that exists.

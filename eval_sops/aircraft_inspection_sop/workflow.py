@@ -5,15 +5,15 @@ def workflow(input_data):
     try:
         manager = get_manager_instance()
 
-        # Step 1: Validate aircraft identification and maintenance record
-        aircraft_clearance = manager.VerifyAircraftClearance(
+        # Step 1: Validate aircraft identification and clearance
+        aircraft_clearance_result = manager.VerifyAircraftClearance(
             aircraft_id=input_data["aircraft_id"],
             tail_number=input_data["tail_number"],
             maintenance_record_id=input_data["maintenance_record_id"],
             expected_departure_time=input_data["expected_departure_time"],
         )
 
-        # Step 2: Inspect mechanical components
+        # Step 2: Inspect mechanical component details
         mechanical_inspection_result = manager.VerifyMechanicalComponents(
             aircraft_id=input_data["aircraft_id"],
             component_serial_number=input_data["component_serial_number"],
@@ -32,7 +32,7 @@ def workflow(input_data):
         )
 
         # Step 4: Cross‑check component specifications
-        cross_check_specifications = manager.CrossCheckSpecifications(
+        cross_check_result = manager.CrossCheckSpecifications(
             aircraft_id=input_data["aircraft_id"],
             component_weight=float(input_data["component_weight"]),
             expected_component_weight=float(input_data["expected_component_weight"]),
@@ -40,14 +40,14 @@ def workflow(input_data):
             actual_inspection_time=input_data["actual_inspection_time"],
         )
 
-        # Step 5: Report any mechanical/electrical inspection incident
+        # Step 5: Report any mechanical or electrical inspection incident
         component_incident_response = manager.ReportComponentIncident(
             aircraft_id=input_data["aircraft_id"],
-            mechanical_inspection_result=str(mechanical_inspection_result),
-            electrical_inspection_result=str(electrical_inspection_result),
+            mechanical_inspection_result=mechanical_inspection_result,
+            electrical_inspection_result=electrical_inspection_result,
         )
 
-        # Step 6: Report component serial number mismatch if any
+        # Step 6: Report component serial number mismatch (if any)
         component_mismatch_response = manager.ReportComponentMismatch(
             aircraft_id=input_data["aircraft_id"],
             component_serial_number=input_data["component_serial_number"],
@@ -55,19 +55,22 @@ def workflow(input_data):
             inspection_location_id=input_data["inspection_location_id"],
         )
 
-        # Step 7: Report cross‑check and reconcile maintenance record
+        # Step 7: Reconcile maintenance record discrepancies
         cross_check_reporting_response = manager.ReportCrossCheck(
             maintenance_record_id=input_data["maintenance_record_id"],
             aircraft_id=input_data["aircraft_id"],
-            component_incident_response=str(component_incident_response),
-            component_mismatch_response=str(component_mismatch_response),
+            component_incident_response=component_incident_response,
+            component_mismatch_response=component_mismatch_response,
         )
 
-        # Assemble final SOP output fields
+        # Determine overall aircraft readiness based on clearance result
+        aircraft_ready = "TRUE" if str(aircraft_clearance_result).lower() == "success" else "FALSE"
+
+        # Assemble final report matching SOP output fields
         return {
             "aircraft_id": input_data["aircraft_id"],
-            "aircraft_ready": "TRUE" if aircraft_clearance else "FALSE",
-            "VerifyShipment": "success" if aircraft_clearance else "failure",
+            "aircraft_ready": aircraft_ready,
+            "VerifyShipment": aircraft_clearance_result,
             "mechanical_inspection_result": mechanical_inspection_result,
             "electrical_inspection_result": electrical_inspection_result,
             "component_incident_response": component_incident_response,

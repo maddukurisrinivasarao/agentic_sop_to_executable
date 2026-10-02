@@ -154,38 +154,92 @@ class SchemaAgent:
         tools_by_name = {t["name"]: t for t in state.get("tools", []) if isinstance(t, dict)}
         plan_tool_names = {step["tool"] for step in state["api_plan"] if step.get("tool")}
 
-        param_names = set()
+        required_param_names = set()
+        optional_param_notes = {}
         return_names = set()
         for name in plan_tool_names:
             tool = tools_by_name.get(name)
             if not tool:
                 continue
-            param_names.update(tool.get("parameters", {}).keys())
+            for pname, pspec in tool.get("parameters", {}).items():
+                if isinstance(pspec, dict) and pspec.get("required") is False:
+                    # Optional with its own default — NOT automatically a
+                    # base-level input. A tool parameter being optional and
+                    # pre-defaulted means codegen can omit it or pass its
+                    # documented default; forcing every parameter (required
+                    # or not) into "base-level input vs. covered by an
+                    # earlier return" previously had no third option, so an
+                    # optional flag like a tool's own `include_history=False`
+                    # default got wrongly promoted to a required input_data
+                    # field that doesn't exist in the real data, crashing
+                    # every row with a KeyError.
+                    optional_param_notes[pname] = pspec.get("default", "no stated default")
+                else:
+                    required_param_names.add(pname)
             returns = tool.get("returns")
             if isinstance(returns, dict):
                 return_names.update(returns.keys())
 
-        if not param_names:
+        if not required_param_names and not optional_param_notes:
             return ""
+
+        optional_section = ""
+        if optional_param_notes:
+            optional_lines = "\n".join(
+                f"  - {pname} (default: {default!r}) — do NOT add this as a "
+                f"base-level input unless the SOP explicitly describes the "
+                f"user/caller supplying it; otherwise the generated code "
+                f"should omit it or pass its documented default literally."
+                for pname, default in sorted(optional_param_notes.items())
+            )
+            optional_section = f"""
+
+These parameters are OPTIONAL on their tool and already have a documented
+default — they are a separate case from the required list below, not part
+of it:
+{optional_lines}"""
 
         return f"""
 Precomputed checklist (do not recompute this by re-reading the tools' prose —
-use it directly): every distinct parameter name required by at least one tool
-your plan actually calls is:
-{sorted(param_names)}
+use it directly): every distinct REQUIRED parameter name needed by at least
+one tool your plan actually calls is:
+{sorted(required_param_names)}
 
 Every distinct field name returned by at least one of those same tools is:
 {sorted(return_names)}
 
-Classify EVERY name in the parameter list above: either it matches (by
-meaning) one of the names in the returns list, or it belongs in your
-input_schema output. Do not output a parameter name that isn't in this
-checklist, and do not omit one that is — this list is complete and
+Classify EVERY name in the required-parameter list above: either it matches
+(by meaning) one of the names in the returns list, or it belongs in your
+input_schema output. Do not output a required parameter name that isn't in
+this checklist, and do not omit one that is — this list is complete and
 authoritative for the tools your plan uses; if a name looks unfamiliar or
-you don't remember seeing it, it's still real if it's in this list."""
+you don't remember seeing it, it's still real if it's in this list.{optional_section}"""
 
     def _build_prompt(self, state: SOPConverterState) -> str:
         checklist = self._compute_parameter_checklist(state)
+
+        # OrchestratorAgent sets retry_feedback (and escalates the graph back
+        # to this agent specifically) only when a validation issue survived a
+        # generator-only retry unchanged AND looks schema-shaped (a missing,
+        # misnamed, or wrongly-required/optional parameter) — i.e. evidence
+        # the SCHEMA itself is the problem, not how codegen used it.
+        feedback_section = ""
+        retry_feedback = state.get("retry_feedback")
+        if retry_feedback:
+            previous_schema = state.get("input_schema") or []
+            feedback_section = f"""
+
+RETRY — A VALIDATION ISSUE PERSISTED THROUGH A CODE-GENERATION RETRY,
+SUGGESTING THE SCHEMA ITSELF (not the generated code) IS MISSING OR
+MISNAMING A FIELD:
+{retry_feedback}
+
+Your previous input parameter list (don't just resubmit this unchanged —
+reconsider whether a required tool parameter is missing, misspelled, or
+incorrectly marked optional/required, based on the issue above):
+{json.dumps(previous_schema, indent=2)}
+"""
+
         return f"""Identify all BASE-LEVEL input parameters for this workflow.
 
 SOP:
@@ -197,6 +251,7 @@ API Plan:
 Available Tools:
 {state['tools_formatted']}
 {checklist}
+{feedback_section}
 
 Base-level inputs are parameters that:
 - Are NOT outputs from other tools in the plan
