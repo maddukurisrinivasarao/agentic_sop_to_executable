@@ -5,7 +5,7 @@ def workflow(input_data):
     try:
         manager = get_manager_instance()
 
-        # Cast and prepare input values
+        # ---------- Input casting ----------
         po_number = input_data["po_number"]
         confirmed_product_id = input_data["confirmed_product_id"]
         received_product_bar_code = input_data["received_product_bar_code"]
@@ -16,45 +16,32 @@ def workflow(input_data):
         intended_warehouse_id = input_data["intended_warehouse_id"]
         actual_warehouse_id = input_data["actual_warehouse_id"]
         unit_cost = float(input_data["unit_cost"])
-        chargeable_flag = str(input_data["chargeable"]).strip().lower() == "true"
-        vendor_id = input_data["vendor_id"]
-        vendor_name = input_data["vendor_name"]
-        QVT = float(input_data["QVT"]) if "QVT" in input_data and input_data["QVT"] != "" else 5.0
+        chargeable_input = str(input_data["chargeable"]).strip().lower() == "true"
 
-        # Step 1: Validate received product barcode against confirmed product ID
-        barcode_res = manager.validateBarcode(
+        # ---------- Step 1: Validate barcode ----------
+        barcode_result = manager.validateBarcode(
             po_number=po_number,
             confirmed_product_id=confirmed_product_id,
             received_product_bar_code=received_product_bar_code,
         )
-        barcode_match = barcode_res["barcode_match"]
-        problem_type = []  # will accumulate all identified problems
-        problem_type.extend(barcode_res["problem_type"])
+        barcode_match = barcode_result["barcode_match"]
+        problem_type = list(barcode_result["problem_type"])  # may contain 'Wrong Item'
+        resolution_status = barcode_result["resolution_status"]
 
-        # Step 2: Assess physical condition of the package (always executed)
-        condition_res = manager.assessPackageCondition(
+        # ---------- Step 2: Assess package condition ----------
+        condition_result = manager.assessPackageCondition(
             po_number=po_number,
             package_image_path=package_image_path,
         )
-        package_condition = condition_res["package_condition"]
-        problem_type.extend(condition_res["problem_type"])
+        package_condition = condition_result["package_condition"]
+        # Append any condition problems
+        problem_type.extend(condition_result["problem_type"])
 
-        # Early termination if barcode does NOT match (Wrong Item)
+        # If barcode mismatch, skip further quantitative checks and chargeback calculation
         if not barcode_match:
-            # Resolve status is already set by barcode validation
-            resolution_status = barcode_res["resolution_status"]
+            # Ensure charge_back_amt is zero when barcode is wrong
             charge_back_amt = 0
-
-            # Generate problem report (optional, result not used further)
-            manager.generateProblemReport(
-                po_number=po_number,
-                vendor_id=vendor_id,
-                vendor_name=vendor_name,
-                problem_type=problem_type,
-                charge_amount=charge_back_amt,
-                resolution_status=resolution_status,
-            )
-
+            # Final resolution_status already set to "Returned to Vendor" by barcode step
             return {
                 "problem_type": problem_type,
                 "resolution_status": resolution_status,
@@ -63,56 +50,47 @@ def workflow(input_data):
                 "charge_back_amt": charge_back_amt,
             }
 
-        # Step 3: Calculate quantity variance and identify quantity-related problems
-        qty_var_res = manager.calculateQuantityVariance(
+        # ---------- Step 3: Calculate quantity variance ----------
+        variance_result = manager.calculateQuantityVariance(
             po_number=po_number,
             ordered_quantity=ordered_quantity,
             confirmed_quantity=confirmed_quantity,
             received_quantity=received_quantity,
-            QVT=QVT,
         )
-        # quantity_variance = qty_var_res["quantity_variance"]  # not required for output
-        problem_type.extend(qty_var_res["problem_type"])
+        # quantity_variance = variance_result["quantity_variance"]  # not needed for output
+        problem_type.extend(variance_result["problem_type"])
 
-        # Step 4: Verify shipment delivered to correct warehouse
-        location_res = manager.verifyWarehouseLocation(
+        # ---------- Step 4: Verify warehouse location ----------
+        location_result = manager.verifyWarehouseLocation(
             po_number=po_number,
             intended_warehouse_id=intended_warehouse_id,
             actual_warehouse_id=actual_warehouse_id,
         )
-        problem_type.extend(location_res["problem_type"])
+        # location_match = location_result["location_match"]  # not needed for output
+        problem_type.extend(location_result["problem_type"])
 
-        # Step 5: Calculate vendor chargeback amount based on identified problems
-        chargeback_res = manager.calculateChargeback(
+        # ---------- Step 5: Calculate chargeback amount ----------
+        chargeback_result = manager.calculateChargeback(
             po_number=po_number,
             problem_type=problem_type,
             ordered_quantity=ordered_quantity,
             received_quantity=received_quantity,
             unit_cost=unit_cost,
         )
-        charge_back_amt = chargeback_res["charge_amount"]
+        charge_back_amt = chargeback_result["charge_amount"]
 
-        # Step 6: Update resolution status according to problem list and chargeable flag
-        # Initialize current status as "Pending"
-        update_res = manager.updateResolutionStatus(
+        # ---------- Step 6: Update resolution status ----------
+        # Determine current status before update
+        current_status = "Processing" if problem_type else "Pending"
+        resolution_result = manager.updateResolutionStatus(
             po_number=po_number,
             problem_type=problem_type,
-            current_status="Pending",
-            chargeable=chargeable_flag,
+            current_status=current_status,
+            chargeable=chargeable_input,
         )
-        resolution_status = update_res["resolution_status"]
+        resolution_status = resolution_result["resolution_status"]
 
-        # Step 7: Generate comprehensive problem classification report
-        manager.generateProblemReport(
-            po_number=po_number,
-            vendor_id=vendor_id,
-            vendor_name=vendor_name,
-            problem_type=problem_type,
-            charge_amount=charge_back_amt,
-            resolution_status=resolution_status,
-        )
-
-        # Combine results into final output dictionary
+        # ---------- Final output assembly ----------
         return {
             "problem_type": problem_type,
             "resolution_status": resolution_status,
