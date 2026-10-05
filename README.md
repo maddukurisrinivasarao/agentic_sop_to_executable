@@ -153,15 +153,32 @@ autoresearch-macos, `train.py` scores itself — it trains *and* prints
 that can't score themselves, so `test_harness.py` exists purely to run the
 pipeline against `eval_sops/` and measure `row_pass_rate`.
 
+### The sop-debugger agent
+
 The coding agent that runs this loop is defined in
 [.claude/agents/sop-debugger.md](.claude/agents/sop-debugger.md). It is a
-Claude Code sub-agent, not a pipeline agent. It reads
+Claude Code sub-agent, not a pipeline agent, and it plays the coding-agent role
+that autoresearch assigns to `program.md`. It reads
 [sop_autoresearch.md](sop_autoresearch.md) (the findings log) and
 [CURRENT_SCORES.md](CURRENT_SCORES.md) (the last verified scores) before it
-starts, then fixes the most durable layer first: the SOP text, then the
-toolspecs and `tools.py`, then shared agent code only when a bug is systematic
-across domains. It checks every change with the zero-cost `--test` run before
-regenerating.
+starts. Compared with autoresearch-macos:
+
+| | autoresearch-macos | sop-debugger (this repo) |
+|---|---|---|
+| Unit of work | one training run | one SOP domain, one failure bucket at a time |
+| Score | `val_bpb` printed by `train.py` | `row_pass_rate` from `test_harness.py`, with `--test` costing zero tokens |
+| Before spending tokens | nothing | zero-cost re-score of the cached `workflow.py`, then the toolspec gate |
+| Where fixes land | `train.py` | the most durable layer first: SOP text, then toolspecs and `tools.py`, then shared agent code, only when a bug is systematic across domains |
+| Keep or discard | keep if the metric improves | triage by score (skip domains at or above 0.95), root-cause into five buckets, stop after 2 or 3 regenerations without improvement |
+| Memory | experiment log | `sop_autoresearch.md` (findings log) and `CURRENT_SCORES.md` (last verified scores) |
+| Guardrails | none beyond the metric | no edits to ground truth, no git operations, no fitting to answer keys, and reported numbers reproduced at full row count |
+
+The rules also cover failure modes this repo has hit: a stale toolspec that
+misleads the planner and schema agents (the toolspec gate runs before every
+regeneration pass, and every tool needs a full output schema); a regression
+from one pass to the next (each pass backs up the workflows it replaces); and
+sampling noise (a domain can score differently across runs, so run more than
+once before reporting a stable score).
 
 Budgeting is token-based rather than a fixed experiment count — see
 `sop_autoresearch.md` Section 2 — since a single `test_harness.py` pass across all
