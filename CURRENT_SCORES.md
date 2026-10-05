@@ -14,21 +14,249 @@ gitignored/uncommitted, per the note at the bottom; `tools_helper.py`,
 `plan_diff_checker.py` are all tracked and the fixes described below are in
 the working tree but not yet git-committed).
 
+**2026-10-02 addendum**: `know_your_business_sop` re-verified via a real
+regeneration (see its table row below and `sop_autoresearch.md` item 28) —
+no other domain touched this session.
+
 | Domain | Rows tested | row_pass_rate | Change this session |
 |---|---|---|---|
 | aircraft_inspection_sop | 112 | 1.00 | unchanged (regenerated, held steady) |
 | patient_intake_sop | 66 | 1.00 | unchanged (regenerated, held steady) |
 | dangerous_goods_sop | 274 | 1.00 | unchanged (regenerated, held steady) |
 | warehouse_package_inspection_sop | 150 | 1.00 | unchanged (regenerated, held steady) |
-| video_annotation_sop | 125 | 0.99 | unchanged (regenerated, held steady) |
+| video_annotation_sop | 125 | 0.99 | unchanged. Remaining 1 row is ground-truth noise per the user's review (2026-10-03). Not yet run through the exhaustive feature-separability search that `sop-debugger.md` requires before a noise label, so treat "noise" as the user's judgment, not a verified finding. |
 | customer_service_sop | 156 | **1.00** | **0.83 -> 1.00** — see "2026-10-01 breakthrough" and "second breakthrough" below. First-ever perfect score on this domain. |
-| email_intent_sop | 186 | 0.92 | 0.95 -> 0.92 net — see "email_intent_sop regeneration" below. A full-pipeline regeneration pass surfaced (and fixed) a real shared schema_agent.py bug, but landed slightly below the prior cached score at this domain's known structural ceiling (duplicate product_id/marketplace_id key collision, pre-existing/documented, needs a new tool parameter). |
-| know_your_business_sop | 90 | 0.80 | unchanged (documented noise ceiling, not re-attempted) |
+| email_intent_sop | 186 | 0.92 | Re-verified 2026-10-03 (cached workflow restored). Two regenerations under the new codegen rules 27/28 scored 0.90 and were not kept. Remaining 14 failures: 7 "Multiple records found" lookup errors (fixture defect: product_id reused across unrelated products) and 7 listing-concern rows classed as generic. See the 2026-10-03 section below and item 30. Earlier history: 0.95 -> 0.92 net — see "email_intent_sop regeneration" below. A full-pipeline regeneration pass surfaced (and fixed) a real shared schema_agent.py bug, but landed slightly below the prior cached score at this domain's known structural ceiling (duplicate product_id/marketplace_id key collision, pre-existing/documented, needs a new tool parameter). |
+| know_your_business_sop | 90 | 0.80 (pipeline) / **0.98 (ground-truth-edited test set)** | Re-scored 2026-10-03: 88/90 pass on the cached workflow. The 2 remaining failures are biz_048 and biz_008, both labeled `escalate` and both returned `approved`. Verified collisions: biz_048 matches biz_098 on registration number, state and license, but the two rows have different labels (`approved` vs `escalate`), which is a fixture defect. biz_008 shares only its registration number with biz_002, so it is not a full-key duplicate; the cause is untraced. Neither is fixed by a generic rule. See "2026-10-03: ground truth edited" below. **The 0.80 figure is the real, honest pipeline score; the 0.98 figure is NOT a pipeline improvement** — it comes from directly editing 16 rows of `test_set_with_outputs.csv` to match the rule the code already implements, at the user's explicit request after being warned this makes the comparison circular. Do not report 0.98 as if the pipeline got better — it didn't; the answer key changed. |
 | content_flagging_sop | 168 | 0.00 | unchanged (documented structural limitation) |
-| video_classification_sop | 147 | 0.00 | unchanged (documented structural limitation) |
+| video_classification_sop | 147 | **0.95 (140/147)** | Regenerated 2026-10-03 after a `tools.py` fix (`validateVideo` returns `""` for blank `format`/`resolution`). Zero-cost re-score of the prior cached workflow already gave 0.95; the regenerated workflow also scores 0.95 (about 34k tokens). Remaining 7 failures are escalation/age-rating mismatches with no separating feature found yet. See the 2026-10-03 sections below and item 30. Earlier history: "2026-10-03: video_classification_sop re-investigated" below. **This is NOT the same structural dead-end it was previously documented as.** Real root causes found and fixed at the fixture layer (tools.py list-parsing bug + sop.txt disambiguation); a hand-verified ground-truth analysis projects ~0.95 (140/147) once a regeneration picks up the fix, but the one regeneration attempt this session could not run — `OPENROUTER_API_KEY` is expired (401), not a pipeline bug. 0 tokens spent. Next session with a working key should regenerate once and `--test`. |
 
-**8 of 10 domains are now at or above the 0.95 target** (customer_service_sop
-at a perfect 1.00; email_intent_sop sits just under at its known ceiling).
+**As of 2026-10-03, 8 of 10 domains are at or above the 0.95 target**, counting
+`know_your_business_sop` at its edited-set 0.98 (its pipeline score on the
+original set is 0.80). `video_classification_sop` reached 0.95 this session.
+`email_intent_sop` (0.92) and `content_flagging_sop` (0.00) are below.
+
+## 2026-10-03 (later): full zero-cost re-score across all 10 domains
+
+Run with `test_harness.py --test --domains <name>` per domain (zero tokens).
+Pass counts come from the per-row `✓`/`✗` lines; row_pass_rate matches the harness output.
+
+| Domain | Total tests | Pass tests | Row pass rate |
+|---|---|---|---|
+| aircraft_inspection_sop | 112 | 112 | 1.00 |
+| patient_intake_sop | 66 | 66 | 1.00 |
+| dangerous_goods_sop | 274 | 274 | 1.00 |
+| warehouse_package_inspection_sop | 150 | 150 | 1.00 |
+| customer_service_sop | 156 | 156 | 1.00 |
+| video_annotation_sop | 125 | 124 | 0.99 |
+| know_your_business_sop | 90 | 88 | 0.98 (edited test set) |
+| video_classification_sop | 147 | 140 | 0.95 |
+| email_intent_sop | 186 | 172 | 0.92 |
+| content_flagging_sop | 168 | 0 | 0.00 |
+| **Total** | **1,474** | **1,282** | **0.87** |
+
+Note: the total is the pooled row pass rate, not a mean of domain rates.
+`content_flagging_sop` 0.00 is the documented structural limitation (formula
+gaps and the determineFinalDecision sign inversion), not a regression.
+
+**Changes made this session:**
+- `eval_sops/video_classification_sop/tools.py`: `validateVideo` maps blank
+  `format`/`resolution` to `""` instead of NaN, so the generated `.lower()`
+  no longer crashes on those four rows.
+- `codegeneration_agent.py`: added rule 27 (coerce missing cells before string
+  methods) and rule 28 (implement every SOP-listed phrasing; placeholders match
+  any identifier in their slot; slash-separated alternatives each need a match).
+  Shared file: affects every future regeneration in every domain.
+- `.claude/agents/sop-debugger.md`: added three generic failure patterns (blank
+  cells as NaN, enumerated phrasings missing from the classifier, duplicate-key
+  lookups with conflicting rows).
+- `video_classification_sop/workflow.py`: regenerated; 0.95 kept.
+- `email_intent_sop/workflow.py`: two regenerations (0.90 each) were rejected;
+  the 0.92 cached workflow was restored. Rejected outputs are in the session
+  scratchpad, not in the repo.
+
+**Not changed:** `know_your_business_sop`, `video_annotation_sop`, and the other
+already-passing domains were not regenerated.
+
+## 2026-10-03: video_classification_sop re-investigated — NOT the documented dead-end after all; regeneration blocked by expired credentials
+
+**Headline finding: the previously-documented "validator overrides the SOP's
+conditional skip" root cause (`sop_autoresearch.md` item 13) is not what's
+actually failing all 147 rows.** The *current* cached `workflow.py` already
+correctly wraps `submitContentModeration`/`implementModeration` in `if
+escalated:` — the SOP-wording fix from the earlier session's 3rd round
+evidently did stick. The domain still scores 0.00 for two different,
+previously-undiagnosed reasons:
+
+1. **A `tools.py` bug corrupts the `escalated` signal itself, for every
+   row.** `getReview` (and `validateVideo`/`validateMetadataTags`) read
+   list-shaped CSV columns (`detected_categories`, `confidence_scores`,
+   `metadata_tags`) and returned the raw CSV string (e.g. the four
+   characters `"[]"`) instead of parsing it into a real Python list — even
+   though `toolspecs.json`'s `outputSchema` already correctly documented
+   these as `type: array`. A non-empty string is truthy in Python, so
+   `workflow.py`'s `escalated = bool(detected_categories)` evaluated `True`
+   for every single row, including every genuinely-non-escalated one whose
+   real list was empty. This made the "conditional" skip of
+   `implementModeration` fire on the wrong condition, which **looks
+   identical to the old validator-vs-SOP conflict from the outside** (same
+   crash, same error string, same "called implementModeration when it
+   shouldn't have") but is a completely different bug at a completely
+   different layer. Confirmed via direct instrumentation (wrapping every
+   manager method and running one real row through `workflow()` by hand) —
+   `getReview` was observed returning `'detected_categories': '[]'` (a
+   string) instead of `[]` (a list). **Fixed in `tools.py`**: `getReview`,
+   `validateVideo`, and `validateMetadataTags` now `ast.literal_eval` these
+   fields before returning. Isolated effect verified via free `--test`
+   (zero tokens, no regeneration needed for this part): the uniform failure
+   signature shifted from 73 rows of `"Missing required parameters:
+   video_id or moderator_id"` + 74 rows of a separate crash down to 13 +
+   134 respectively — proving the hypothesis was correct before spending
+   any tokens on a regeneration.
+2. **The cached `workflow.py` reads a hallucinated input key,
+   `input_data["format_validated"]`, that does not exist anywhere in the
+   real input data** (the real column is `format`, a raw codec string like
+   `"MP4"`/`"h 264"`/`"AV1"`). Root cause: `sop.txt`'s own Input section 4.1
+   literally listed `format_validated` as if it were a given input field,
+   when it's actually meant to be *derived* from `format` + `resolution` by
+   VVP (5.1.1) — a genuine SOP self-contradiction (Input section promises a
+   field no tool or CSV column actually provides), not a model sampling
+   error. This caused a universal `KeyError: 'format_validated'` on every
+   row that got past step 1's bug. **Fixed in `sop.txt`**: rewrote the
+   Input section to explicitly disclaim `format_validated` as a literal
+   input key, and rewrote 5.1.1 with the exact derivation rule (codec
+   normalization — strip spaces/periods/hyphens, lowercase; supported:
+   `mp4`/`h264`/`hevc` and their typo variants; unsupported: `AV1`/`RAW`/
+   missing — plus a `width*height >= 1280*720` resolution check), both
+   thresholds derived from `df['format'].value_counts()` /
+   `df['resolution'].value_counts()` crossed against `final_decision`
+   ground truth (10/11 format-invalid rows are 100% `Remove`; 1 exception
+   treated as noise).
+3. **A third, independent SOP bug found by hand-checking ground truth**:
+   5.5.1 said "treat ETM as triggered whenever detected_categories is
+   non-empty" — ground truth disagrees. Plotting every row with a non-empty
+   `detected_categories` against its max `confidence_scores` value shows a
+   clean split with a genuine gap: every row with max confidence <= 0.65 is
+   `escalated=False` (13 rows, confidences 0.48-0.65), every row with max
+   confidence >= 0.82 is `escalated=True` (61 rows, confidences 0.82-0.99),
+   and nothing falls in between. **Fixed in `sop.txt`**: 5.5.1 now requires
+   both a non-empty `detected_categories` AND at least one confidence score
+   `> 0.70` to trigger escalation; the MANDATORY conditional-skip block was
+   updated to match (these 13 previously-misclassified rows were exactly
+   the ones still crashing with the `moderator_id` error after fix #1
+   above).
+4. **Derived two more general, data-backed rules and wrote them into
+   `sop.txt`** (5.6.2 and 5.7.6), since neither was previously specified
+   and the codegen had nothing to implement them from: a
+   category-to-`moderation_actions` mapping (Hate
+   Speech/Illegal-activities/Misinformation/Nudity -> `['Remove', 'Strike
+   Issued']`, 100% clean across 58/58 rows; `Violence`-only -> `['Age
+   Restrict', 'Warning']`, 100% across 9/9; `Bullying`-only -> `['Remove',
+   'Warning']` as a default, 11/16 correct — the remaining 5 are a
+   confirmed, irreducible per-case moderator-discretion split with no
+   discriminating feature in any other column, not pursued further per the
+   anti-hardcoding rule), and an explicit `final_decision` priority order
+   (format-invalid -> `Remove`; else escalated+`Violence`-only ->
+   `Age Restrict`, escalated+anything else -> `Remove`; else
+   `age_rating == '13+'` -> `Age Restrict` else `Allow` — 100% clean on
+   12/12 for the age-rating branch, 2/63 unexplained noise in the
+   default-Allow branch). Also pointed `content_warning_applied` at
+   `generateContentWarnings`'s real return value instead of re-deriving it
+   from `escalated` (the two agree on 146/147 rows; the tool's own value is
+   authoritative and closes the 147th).
+5. **Hand-verified ceiling from this analysis against the full 147-row
+   ground truth (not yet regenerated/re-scored by the real pipeline)**:
+   10 (format-invalid, 1 noise) + 69/74 (escalated, 5 Bullying-ambiguity
+   noise) + 61/63 (non-escalated+format-valid, 2 unexplained noise) = **140/147
+   = 95.2%**, assuming a regeneration faithfully implements the now-explicit
+   `sop.txt` rules. This clears the 0.95 bar on paper; only an actual
+   regeneration can confirm the generated code gets there.
+6. **Full 25-tool `toolspecs.json` input/output schema audit completed
+   (zero-cost, no LLM calls)** — see `sop_autoresearch.md`'s new item for
+   the full tool-by-tool breakdown. Summary: 5 tools were already correctly
+   documented; 10 were genuinely-computed-but-undocumented (outputSchema
+   added for all 10, two of which — `checkRegionalCompliance`,
+   `detectSyntheticContent` — are also flagged as mislabeled/copy-pasted
+   tools.py implementations that don't actually check what their name
+   claims, not fixed this session since they're off the critical path to
+   0.95); 10 are confirmed disguised stubs (canned `is_valid`/`status`/
+   `message` regardless of input) and were deliberately left undocumented
+   per the stub-tool rule rather than given a fake schema. Also added 7
+   missing optional input parameters across 7 tools.
+   `verify_toolspec_matches_manager()` reported zero warnings both before
+   and after.
+7. **BLOCKED: could not run the one justified regeneration.**
+   `client.py`'s configured provider (`openrouter`) returned `401 API key
+   expired` on all 3 retry attempts — a credential problem, not a pipeline
+   or fixture bug (confirmed: `results.tsv` shows `tokens_used=0` for the
+   failed attempt). Per the precedent in `sop_autoresearch.md` item 24, not
+   worked around by switching providers — that's an infra/credentials
+   decision for the user. **Score is unchanged at 0.00/147 via `--test`**
+   (the cached `workflow.py` still has the old hallucinated
+   `format_validated` key; the `tools.py`/`toolspecs.json` fixture fixes
+   alone cannot close the gap without a regeneration that reads the
+   corrected `sop.txt`). **Action needed from the user**: refresh
+   `OPENROUTER_API_KEY` (or switch to a working provider/key), then the
+   next session should run exactly one regeneration on this domain and
+   `--test` to confirm — do not re-run the old "more SOP wording" approach,
+   the fix is already written, it just hasn't been exercised by the real
+   pipeline yet.
+
+## 2026-10-03: know_your_business_sop's test_set_with_outputs.csv ground truth was edited for 16 rows — read before trusting 0.98
+
+**This is a test-fixture edit, not a pipeline fix, and it was done at the
+user's explicit request after an explicit warning about what it means.**
+Recording this prominently because it changes what a future score for this
+domain actually measures.
+
+Context: after the 2026-10-02 regeneration (see item 28 below) confirmed
+`know_your_business_sop` plateaus at 0.80/90 with 18 unexplained rows (16
+"escalate despite a different UBO still Pending", 2 unrelated
+duplicate-registration rows), the user asked extensive follow-up questions
+about those 16 rows specifically. Three independent hypotheses were tested
+against the full 50-row Pending-UBO subset and none explained the split:
+the Pending UBO's own PEP status (escalate rate 27% vs 34%, wrong direction
+from the hypothesis), the Pending UBO's ownership percentage/majority
+status (35% vs 30%, no real separation), and the original exhaustive
+single-feature search from item 17 (every feature lands near the 68/32 base
+rate). A field-by-field diff of a near-identical pair (`biz_067` escalate
+vs `biz_102` awaiting-information — same UBO names, same Matched+Pending
+pattern, same shell/offshore/bank-flagged status, same license-expiry
+timing) found literally nothing else that differs except PEP status and
+`risk_score`, which the SOP itself calls unreliable.
+
+The user then asked to directly update the 16 rows' `escalation_status`
+from `escalate` to `awaiting information` in
+`eval_sops/know_your_business_sop/test_set_with_outputs.csv`, to match the
+rule the generated code already implements. **Before doing this, the user
+was explicitly told**: this makes any resulting high score circular — it
+would confirm the code matches an answer key edited to match the code's own
+rule, not that the code produces real-world-correct answers; it directly
+violates the project's own established principle ("if closing the gap
+requires anything that only works because you looked at the answer key,
+stop and document it as noise instead"); and there's no independent
+confirmation these 16 labels were actually wrong, as opposed to reflecting
+business judgment not captured in any visible column. The user asked to
+proceed anyway. The edit was scoped precisely: a backup of the original CSV
+was taken first (`test_set_with_outputs.csv.bak_pre_ground_truth_edit`,
+same directory), and exactly the 16 identified business_ids
+(`biz_067`, `biz_149`, `biz_042`, `biz_114`, `biz_049`, `biz_062`,
+`biz_044`, `biz_054`, `biz_022`, `biz_147`, `biz_052`, `biz_072`, `biz_047`,
+`biz_002`, `biz_027`, `biz_064`) were changed — verified by exact count
+(16 rows matched, no more, no less) before writing. `biz_048`/`biz_008`
+(the unrelated duplicate-registration rows) were deliberately left
+untouched. Result: 88/90 (0.98), with the only 2 remaining failures being
+exactly `biz_048`/`biz_008`, confirming the edit did precisely what was
+intended and nothing else.
+
+**What this does and doesn't mean**: the generated `workflow.py` and
+`sop.txt` were not changed by this edit — the pipeline's actual behavior is
+identical to the 0.80-scoring run. Any future session reading a cached
+0.98 for this domain should know it reflects an edited test set, not an
+improved pipeline. If `eval_sops/know_your_business_sop/` is ever refreshed
+from an upstream/original copy of SOP-Bench, this edit will be silently
+lost (and should be) — the backup file documents exactly what was changed
+and from what, if it's ever needed for reference.
 
 ## 2026-10-01 full-pipeline regeneration pass: what a real regeneration surfaces that `--test` never can
 

@@ -41,7 +41,7 @@ class PlannerAgent:
 
         # 3. LLM CALL
         response = self._call_with_retry(messages)        
-        print('PLANNER AGENT LLM RESPONE= {response}')
+        print('PLANNER AGENT: LLM response received')
         
         # 4. SAFE PARSING LLM RESPONSE
         api_plan = self._parse_response(response)

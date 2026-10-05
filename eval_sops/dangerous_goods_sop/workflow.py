@@ -5,85 +5,113 @@ def workflow(input_data):
     try:
         manager = get_manager_instance()
 
-        # Step 1: Validate product ID format (must be P_XXXXX where X are digits)
-        product_id = input_data["product_id"]
-        if not (product_id.startswith("P_") and len(product_id) == 7 and product_id[2:].isdigit()):
-            # Early termination due to invalid product ID
-            xml_err = (
-                "<result>"
-                "<hazard_score>0</hazard_score>"
-                "<hazard_class>Unable to Decide</hazard_class>"
-                "</result>"
-            )
+        # --------------------------------------------------------------------
+        # Step 0: Validate product ID format (P_XXXXX where X are alphanumeric)
+        # --------------------------------------------------------------------
+        product_id_raw = input_data["product_id"]
+        pid_valid = False
+        if isinstance(product_id_raw, str):
+            if product_id_raw.startswith("P_"):
+                suffix = product_id_raw[2:]
+                if len(suffix) == 5 and suffix.isalnum():
+                    pid_valid = True
+        if not pid_valid:
+            # Early termination: invalid product ID
             return {
                 "hazard_score": 0,
                 "hazard_class": "Unable to Decide",
-                "registry_entry": None,
-                "api_logs": {},
-                "audit_trail": "Product ID validation failed.",
-                "xml_output": xml_err,
-                "status": "failed"
+                "registry_record": {},
+                "api_logs": [],
+                "audit_trail": ["Product ID validation failed"],
+                "xml_output": "<hazard_score>0</hazard_score><hazard_class>Unable to Decide</hazard_class>"
             }
 
-        # Step 2: Calculate SDS label score
+        # -------------------------------------------------
+        # Step 1: Calculate SDS label severity score
+        # -------------------------------------------------
         sds_res = manager.calculate_sds_label_score(
-            product_id=product_id,
+            product_id=product_id_raw,
             sds_label_text=input_data["sds_label_text"]
         )
-        sds_score = sds_res["sds_label_score"]
+        sds_score = sds_res.get("sds_label_score", 0)
+        # Validation: score must be between 0 and 5 inclusive; negative or >5 is error
+        if not isinstance(sds_score, int):
+            raise ValueError("SDS score not integer")
         if sds_score < 0 or sds_score > 5:
-            raise ValueError("SDS label score out of valid range (0-5)")
+            raise ValueError("SDS score out of valid range")
 
-        # Step 3: Calculate handling score
-        handling_params = {
-            "product_id": product_id,
-            "handling_and_storage_guidelines": input_data["handling_and_storage_guidelines"]
-        }
-        if "assessmentFormId" in input_data:
-            handling_params["assessmentFormId"] = input_data["assessmentFormId"]
-        handling_res = manager.calculate_handling_score(**handling_params)
-        handling_score = handling_res["handling_score"]
+        # -------------------------------------------------
+        # Step 2: Calculate handling and storage severity score
+        # -------------------------------------------------
+        handling_res = manager.calculate_handling_score(
+            product_id=product_id_raw,
+            handling_and_storage_guidelines=input_data["handling_and_storage_guidelines"]
+        )
+        handling_score = handling_res.get("handling_score", 0)
+        if not isinstance(handling_score, int):
+            raise ValueError("Handling score not integer")
         if handling_score < 0 or handling_score > 5:
-            raise ValueError("Handling score out of valid range (0-5)")
+            raise ValueError("Handling score out of valid range")
 
-        # Step 4: Calculate transportation score
-        transport_res = manager.calculate_transportation_score(
-            product_id=product_id,
+        # -------------------------------------------------
+        # Step 3: Calculate transportation severity score
+        # -------------------------------------------------
+        transportation_res = manager.calculate_transportation_score(
+            product_id=product_id_raw,
             transportation_requirements=input_data["transportation_requirements"]
         )
-        transport_score = transport_res["transportation_score"]
-        if transport_score < 0 or transport_score > 5:
-            raise ValueError("Transportation score out of valid range (0-5)")
+        transportation_score = transportation_res.get("transportation_score", 0)
+        if not isinstance(transportation_score, int):
+            raise ValueError("Transportation score not integer")
+        if transportation_score < 0 or transportation_score > 5:
+            raise ValueError("Transportation score out of valid range")
 
-        # Step 5: Calculate disposal score
+        # -------------------------------------------------
+        # Step 4: Calculate disposal severity score
+        # -------------------------------------------------
         disposal_res = manager.calculate_disposal_score(
-            product_id=product_id,
+            product_id=product_id_raw,
             disposal_guidelines=input_data["disposal_guidelines"]
         )
-        disposal_score = disposal_res["disposal_score"]
+        disposal_score = disposal_res.get("disposal_score", 0)
+        if not isinstance(disposal_score, int):
+            raise ValueError("Disposal score not integer")
         if disposal_score < 0 or disposal_score > 5:
-            raise ValueError("Disposal score out of valid range (0-5)")
+            raise ValueError("Disposal score out of valid range")
 
-        # Step 6: Hazard score computation with imputation logic
+        # -------------------------------------------------
+        # Step 5: Hazard Score Computation with imputation logic
+        # -------------------------------------------------
         scores = {
-            "safety": sds_score,
+            "sds": sds_score,
             "handling": handling_score,
-            "transportation": transport_score,
+            "transportation": transportation_score,
             "disposal": disposal_score
         }
-        missing_keys = [k for k, v in scores.items() if v == 0]
+        missing_count = sum(1 for v in scores.values() if v == 0)
 
-        if len(missing_keys) >= 2:
+        if missing_count >= 2:
             hazard_score = 0
             hazard_class = "Unable to Decide"
         else:
-            if len(missing_keys) == 1:
-                # Impute missing component with max of the others
-                max_other = max(v for v in scores.values() if v != 0)
-                scores[missing_keys[0]] = max_other
+            # Impute if exactly one component is missing
+            if missing_count == 1:
+                # Find max of non‑zero scores
+                max_score = max(v for v in scores.values() if v != 0)
+                # Replace the zero with max_score
+                for k, v in scores.items():
+                    if v == 0:
+                        scores[k] = max_score
+                        break
+            # Compute cumulative hazard score
             hazard_score = sum(scores.values())
+            # Validate total range (4‑20)
+            if hazard_score < 4 or hazard_score > 20:
+                raise ValueError("Cumulative hazard score out of acceptable range (4‑20)")
 
-            # Step 7: Hazard class determination
+            # -------------------------------------------------
+            # Step 6: Hazard Class Determination
+            # -------------------------------------------------
             if 4 <= hazard_score <= 7:
                 hazard_class = "Hazard Class A"
             elif 8 <= hazard_score <= 14:
@@ -93,48 +121,50 @@ def workflow(input_data):
             elif 17 <= hazard_score <= 20:
                 hazard_class = "Hazard Class D"
             else:
+                # This should not happen due to earlier validation
                 hazard_class = "Unable to Decide"
 
-        # Assemble API logs
-        api_logs = {
-            "sds": sds_res,
-            "handling": handling_res,
-            "transportation": transport_res,
-            "disposal": disposal_res
-        }
-
-        # Registry entry (digital record)
-        registry_entry = {
-            "product_id": product_id,
+        # -------------------------------------------------
+        # Assemble output components
+        # -------------------------------------------------
+        registry_record = {
+            "product_id": product_id_raw,
             "hazard_score": hazard_score,
             "hazard_class": hazard_class
         }
 
-        # Audit trail documentation
-        audit_trail = (
-            f"Product ID validated. SDS score={sds_score}, "
-            f"Handling score={handling_score}, Transportation score={transport_score}, "
-            f"Disposal score={disposal_score}. Computed hazard_score={hazard_score}. "
-            f"Determined {hazard_class}."
-        )
+        api_logs = [
+            {"step": "SDS", "response": sds_res},
+            {"step": "Handling", "response": handling_res},
+            {"step": "Transportation", "response": transportation_res},
+            {"step": "Disposal", "response": disposal_res}
+        ]
 
-        # XML formatted final output
+        audit_trail = [
+            "Product ID validated",
+            "SDS score calculated",
+            "Handling score calculated",
+            "Transportation score calculated",
+            "Disposal score calculated",
+            "Hazard score computed",
+            "Hazard class determined"
+        ]
+
         xml_output = (
-            "<result>"
             f"<hazard_score>{hazard_score}</hazard_score>"
             f"<hazard_class>{hazard_class}</hazard_class>"
-            "</result>"
         )
 
-        # Final combined return
+        # -------------------------------------------------
+        # Final return mapping SOP output fields to values
+        # -------------------------------------------------
         return {
             "hazard_score": hazard_score,
             "hazard_class": hazard_class,
-            "registry_entry": registry_entry,
+            "registry_record": registry_record,
             "api_logs": api_logs,
             "audit_trail": audit_trail,
-            "xml_output": xml_output,
-            "status": "success"
+            "xml_output": xml_output
         }
 
     except Exception as e:

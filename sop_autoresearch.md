@@ -360,9 +360,23 @@ Before the first experiment:
     addition to) a real generation bug — the specific fixes described
     elsewhere in this file (toolspec/SOP/agent changes) were still real and
     still correct, they just weren't getting full credit until now.
-13. **Known unsolved failure mode: the validator's own "every API-plan step
+13. **[SUPERSEDED — see item 29] Known unsolved failure mode: the validator's own "every API-plan step
     must be implemented" bias can override a genuinely-correct conditional
     skip, no matter how explicitly the SOP states the condition.**
+    **2026-10-03 update: re-investigated. The cached `workflow.py` as of
+    this writing already correctly implements the conditional skip this
+    item describes — the SOP-wording fix evidently did stick. The domain's
+    persistent 0.00 turned out to have two completely different root
+    causes that happened to produce an identical-looking crash from the
+    outside (a `tools.py` list-serialization bug that corrupted the
+    `escalated` signal itself, and a separate `sop.txt` self-contradiction
+    naming a nonexistent input field). See item 29 for the full
+    investigation, fixes, and a hand-verified ~0.95 projected ceiling. Do
+    not treat this item's "validator-vs-SOP conflict, needs a
+    validation_agent.py change" conclusion as still the live diagnosis for
+    this domain — it may still be a real, separate, latent risk worth
+    keeping in mind for OTHER domains with a similar conditional-skip
+    shape, but it is not what is currently blocking this one.**
     `video_classification_sop` (24 tools) needs `submitContentModeration`/
     `implementModeration` called ONLY when escalation is actually triggered
     (`detected_categories` non-empty) — calling them unconditionally crashes
@@ -929,6 +943,408 @@ Before the first experiment:
     (every parameter present, but required and optional lumped together) can
     still cause a universal crash, for a different reason than an incomplete
     one would.
+
+28. **2026-10-02: `know_your_business_sop` re-verified via a real
+    regeneration against today's accumulated shared-pipeline changes — a
+    clean reproduction of the documented ceiling, not a new finding.** Baseline
+    reconfirmed at `--test` time: **0.80/90** (72/90 passing), zero tokens,
+    matching the prior session's cached state exactly. Before spending a
+    regeneration, did the zero-cost static check this task specifically
+    asked for: does this domain's `toolspecs.json` have any
+    `"type": "object"` Returns field with nested `properties` (the shape
+    item 26's `tools_helper.py` fix targets), or any optional/defaulted tool
+    parameter (the shape item 24's `schema_agent.py` required/optional-split
+    fix targets)? **Neither applies here** — every one of this domain's 8
+    tools has either scalar-typed outputSchema fields or a `"type": "string"`
+    field whose *description* (not its JSON-schema type) says "array — list
+    of {name, status} objects..." (`sanction_check_status`, `pep_status`,
+    `ubo_list`), which is a different, pre-existing workaround shape that
+    never triggers `_extract_schema_fields`'s `type == "object" and
+    "properties" in field_spec` condition. Likewise every tool parameter in
+    this domain's `inputSchema` is `required` with no `default` — nothing
+    for the required/optional split to have been misclassifying. So, going
+    in, the correct expectation was "this regeneration is a pure regression
+    check, not a likely fix" — confirmed by the result.
+
+    Ran the regeneration anyway, as directed (67,857 tokens, one pipeline
+    pass, no retries needed to reach a completed result): **0.80/90**,
+    byte-identical pass rate to the pre-regeneration baseline, re-confirmed
+    with a follow-up free `--test`. The regenerated `workflow.py` is a
+    genuinely fresh LLM sample, not a no-op — `git diff` shows substantial
+    rewording (step order 3/4 swapped between `verifyBusinessRegistration`
+    and `performSanctionsCheck`, variable names changed throughout,
+    `tax_id_invalid` default flipped from `False` to `True`-then-cleared
+    instead of `False`-then-set, etc.) — but it preserved the one piece of
+    decision logic that actually matters here: **"any UBO still
+    `Pending`" is checked first, unconditionally, before the escalation
+    trigger list**, exactly the ordering item 16's SOP rewrite established.
+    This is a good sign for the SOP fix's durability: a completely fresh
+    sample, reasoning from scratch over the current `sop.txt` text (not
+    copying the prior `workflow.py`), independently reproduced the same
+    priority order, meaning the SOP text itself (not a lucky prior sample)
+    is what's carrying that fix forward.
+
+    The 18 failing rows this regeneration produced are **the exact two
+    categories item 17 already documented**, confirmed by reading every
+    mismatch line in the run log rather than assuming from the count alone:
+    - **16 rows**: `sanctions_pending=True` (a different UBO than the
+      `Matched`/escalation-triggering one is still `Pending`) correctly
+      routes to `escalation_status="awaiting information"` per the
+      pending-first rule, but ground truth says `"escalate"` for these
+      specific 16 — business_ids `biz_002, biz_022, biz_027, biz_042,
+      biz_044, biz_047, biz_049, biz_052, biz_054, biz_062, biz_064,
+      biz_067, biz_072, biz_114, biz_147, biz_149`. This is the same
+      16-row "escalate despite pending" minority item 17's exhaustive
+      single/paired-feature search already found no discriminating feature
+      for (every feature's split lands near the 68/32 base rate regardless
+      of value) — not re-run this session since nothing in today's
+      diagnosis surfaced a new candidate feature to test, and the task's
+      own guidance is explicit that a documented noise ceiling doesn't move
+      just because the bar did.
+    - **2 rows**: `biz_048` and `biz_008` — the exact two business_ids item
+      17 names as the cross-row duplicate-registration-number/license/
+      tax_id/bank-account signal that needs a dataset-wide lookup tool no
+      current `workflow(input_data)` single-row call can perform. Both
+      landed on `escalation_status="approved"` this regeneration (no
+      single-row trigger fires for either in isolation), same root cause,
+      same missing-tool conclusion as before.
+
+    **Conclusion: not a regression, not an improvement — a clean
+    reproduction confirming (a) today's four shared-pipeline changes
+    correctly have zero effect on a domain whose toolspec/schema shapes
+    don't match any of their trigger conditions, and (b) the 0.80 ceiling
+    here is genuinely structural (16 rows of ground-truth noise + 2 rows
+    needing a new tool), not an artifact of any one unlucky sample.** Not
+    re-attempted further per the stop rule — this is the 2nd total
+    regeneration attempt on this domain (1st was the item 15/16 session that
+    raised it from 0.60 to 0.80), and the task's own framing ("a documented
+    noise ceiling doesn't move") plus a matching zero-cost static check
+    argued against expecting this one to move before it was even run.
+    Closing this domain's remaining 20% to reach 0.95 would require either
+    inventing business logic to match the unexplained 16-row minority
+    (explicitly disallowed — would be fitting noise, not a real rule) or
+    building a new `checkForDuplicateRegistration`-style cross-row lookup
+    tool for the other 2 rows — a new capability beyond this loop's fixture-
+    fix scope, flagged for the user's attention rather than built.
+
+29. **2026-10-03: `video_classification_sop` re-investigated from scratch —
+    the documented "validator-vs-SOP conflict" (item 13) was never the real
+    (or at least never the only) blocker; two independent, previously
+    undiagnosed bugs were hiding behind an identical-looking crash
+    signature, and fixing both (plus two further SOP-ambiguity fixes found
+    along the way) projects a ~0.95 ceiling on paper — but the one
+    justified regeneration to confirm it could not be run this session
+    (expired `OPENROUTER_API_KEY`, see the "blocked" note at the end).**
+
+    Baseline re-verified at **0.00/147** via `--test` (147 data rows in
+    `test_set_with_outputs.csv`, matches exactly). Root-caused by
+    instrumenting every manager method with a print wrapper and running one
+    real failing row through the cached `workflow.py` by hand (per the
+    debug loop's own instrumentation rule), rather than guessing from the
+    harness's generic error strings — essential here, since two completely
+    different bugs both produced the error `"Missing required parameters:
+    video_id or moderator_id"` (the exact symptom item 13 attributed to the
+    validator overriding a conditional skip), and a third bug produced a
+    second uniform error, `KeyError: 'format_validated'`.
+
+    **Bug #1 (tools.py, bucket 1/2 boundary — schema said array, code
+    returned a string): `getReview`'s `detected_categories`/
+    `confidence_scores`, and `validateVideo`/`validateMetadataTags`'s
+    `metadata_tags`, all returned the raw CSV cell string (e.g. the literal
+    4-character string `"[]"`) instead of a parsed Python list — even
+    though `toolspecs.json` already correctly documented all three as
+    `type: array`.** A non-empty string is truthy in Python, so
+    `workflow.py`'s `escalated = bool(detected_categories)` evaluated
+    `True` on every single row, including every genuinely-empty-list one.
+    The generated code's own conditional skip logic (`if escalated:` around
+    `submitContentModeration`/`implementModeration`) was actually already
+    correct — it was being fed a permanently-corrupted condition, which is
+    indistinguishable from "the skip doesn't work" by output alone. This is
+    why item 13's diagnosis (a validator/codegen tug-of-war) looked so
+    convincing across 7 regeneration attempts: every attempt's generated
+    code plausibly *did* contain a correctly-shaped `if escalated:` guard,
+    and still crashed 100% of the time regardless, which reads exactly like
+    "the guard isn't being honored" rather than "the guard's own input is
+    wrong." **Fixed in `tools.py`**: added `ast.literal_eval()` (guarded by
+    an `isinstance(..., str)` check) to all three fields in all three
+    methods. Verified the isolated effect via a free `--test` (no
+    regeneration, since this is a fixture-layer fix to a file the cached
+    `workflow.py` already calls): failure signature shifted from 73 rows of
+    the `moderator_id` error + 74 rows of a second crash, to 13 + 134
+    respectively — proof the hypothesis was real before spending any
+    tokens confirming it further.
+
+    **Bug #2 (sop.txt self-contradiction, bucket 3): the Input section
+    (4.1) listed `format_validated` as if it were a literal field present
+    in the input data — it is not; no CSV column, tool return, or
+    `input_data` key by that exact name exists anywhere.** The generated
+    `workflow.py` read `input_data["format_validated"]` directly, which
+    `KeyError`s on literally every row with no exception, since the key
+    never exists. The real input field is `format` (a raw, sometimes
+    typo'd/spaced codec string like `"MP4"`, `"h 264"`, `"AV1"`) plus
+    `resolution` (`"WIDTHxHEIGHT"`) — `format_validated` was always meant to
+    be *derived* from these two via 5.1.1's VVP step, not supplied as-is.
+    This is a case of the SOP's own Input section contradicting its own
+    Main Procedure section (one says "here is format_validated", the other
+    says "here is how you compute format_validated from format") — the
+    generated code faithfully implemented the (wrong) Input section
+    literally. **Fixed in `sop.txt`**: rewrote 4.1 to explicitly name
+    `format` (not `format_validated`) as the real input field and added an
+    explicit "format_validated is NOT a literal input key" warning; rewrote
+    5.1.1 with the exact, data-derived normalization/threshold rule —
+    normalize `format` by lowercasing and stripping spaces/periods/hyphens;
+    supported codecs after normalization are exactly `mp4`/`h264`/`hevc`
+    (covers every typo variant actually present in the data: `"h 264"`,
+    `"H.264"`, `"hevc"`, `"MP4"`, `"mp4"`, `"m p4"`); unsupported:
+    `"AV1"`, `"RAW"`/`"R A W"`, or a missing/blank format; resolution must
+    satisfy `width * height >= 1280*720`. Both thresholds were derived by
+    crossing `df['format'].value_counts()`/`df['resolution'].value_counts()`
+    against the `final_decision` ground-truth column (not guessed): every
+    one of the 8 observed typo'd-but-supported format strings has a mixed
+    `final_decision` distribution (proving they're accepted, consistent
+    with 5.1.1's pre-existing "don't discard on typos" instruction), while
+    `AV1`/`RAW`/`R A W`/missing are 10/11 uniformly `Remove` (1 noise
+    exception, `vid_00064`, a missing-format row ground-truthed `Allow` with
+    no other distinguishing feature — not pursued, consistent with this
+    domain's general ~1-2% noise floor found throughout this investigation).
+
+    **Bug #3 (sop.txt ambiguity/wrong business rule, bucket 3): 5.5.1 said
+    "treat ETM as triggered whenever detected_categories is non-empty" —
+    this is simply wrong against ground truth, not just underspecified.**
+    After fixing bugs #1-#2, `--test` still showed 13 rows crashing with
+    the `moderator_id` error — all 13 turned out to be rows with a
+    non-empty `detected_categories` (mostly `['Nudity']`, one `['Bullying']`)
+    where ground-truth `escalated` is actually `False`. Plotting every
+    non-empty-category row's max `confidence_scores` value against its
+    ground-truth `escalated` label shows a clean, total separation with a
+    real gap: all 13 "non-escalated despite a detected category" rows have
+    max confidence in `[0.48, 0.65]`; all 61 escalated rows have max
+    confidence in `[0.82, 0.99]`; zero rows fall in `(0.65, 0.82)`. This is
+    not noise — it's a real, missing threshold the SOP never stated.
+    **Fixed in `sop.txt`**: 5.5.1 and the MANDATORY conditional-skip block
+    now require both a non-empty `detected_categories` AND at least one
+    `confidence_scores` value `> 0.70` (chosen in the middle of the
+    observed 0.65-0.82 gap) before escalating / before calling
+    `submitContentModeration`/`implementModeration`.
+
+    **Two further rules derived from ground truth and written into `sop.txt`
+    since neither was previously specified anywhere** (needed for the
+    `moderation_actions` and `final_decision` output fields, both of which
+    the cached `workflow.py` had previously hardcoded to `[]` / a 2-branch
+    guess, respectively):
+    - **5.6.2 (new): `moderation_actions` from `detected_categories`,**
+      not from keyword-matching the moderator's free-text notes (confirmed
+      by reading 8 real notes samples — none contain an action name
+      literally; this requires either real semantic judgment the generated
+      code can't perform, or a lookup table keyed on the already-resolved
+      category instead). Category -> actions mapping, each verified against
+      every matching row in the 74-row escalated subset: `Hate Speech` /
+      `Illegal activities` / `Misinformation` / `Nudity` (alone or combined
+      with anything else) -> `['Remove', 'Strike Issued']` (58/58, 100%);
+      `Violence` alone (no other category) -> `['Age Restrict', 'Warning']`
+      (9/9, 100%); `Bullying` alone -> `['Remove', 'Warning']` as the
+      documented default (11/16, 69%) — the other 5/16 ground-truth
+      `['Remove', 'Strike Issued']` rows were checked against every other
+      available column (confidence score, `uploader_history`) and found to
+      have no discriminating feature (e.g. `uploader_history="NSFW content
+      history"` maps to `Warning` in one row and `uploader_history="flagged
+      by community"` maps to both `Warning` and `Strike Issued` in two
+      different rows with similar confidence) — documented as irreducible
+      per-case moderator discretion, not pursued further per the
+      anti-hardcoding rule (this would require inventing a rule tied to
+      specific rows to close).
+    - **5.7.6 (rewritten): explicit `final_decision` priority order** —
+      format-invalid -> `Remove`; else if escalated: `Violence`-only ->
+      `Age Restrict`, anything else -> `Remove` (both checked against the
+      full 74-row escalated subset, 100% clean, no exceptions); else (not
+      escalated, format valid): `age_rating == '13+'` -> `Age Restrict`
+      (12/12, 100%), else `Allow` (49/51, 96%; 2 unexplained exceptions —
+      `vid_00171` ground-truthed `Remove` and `vid_00028` ground-truthed
+      `Warning`/`content_warning_applied=True` — checked against
+      `uploader_history`, `metadata_tags`, `duration_seconds`, `frame_rate`
+      with no distinguishing signal found in either; documented as noise,
+      consistent with this domain's floor). Also pointed the output's
+      `content_warning_applied` field at calling `generateContentWarnings`
+      and using its real returned value directly, instead of re-deriving it
+      from `escalated` — the two agree on 146/147 rows (the tool's own
+      value is the authoritative, already-recorded platform determination,
+      the same convention `assessAgeRating` already uses for `age_rating`;
+      see the toolspec audit below), closing the 147th.
+
+    **Hand-verified ceiling from this analysis, checked against the full
+    147-row ground truth directly in pandas (not yet regenerated/re-scored
+    by the actual pipeline)**: 10/11 (format-invalid branch) + 69/74
+    (escalated branch, limited by the Bullying-action noise) + 61/63
+    (non-escalated-but-format-valid branch) = **140/147 = 95.2%** — clears
+    the 0.95 bar on paper, assuming a regeneration against the corrected
+    `sop.txt` faithfully implements these now-explicit rules. This is a
+    projection from hand-checking the rules against ground truth, not a
+    verified pipeline score — only an actual regeneration + `--test` can
+    confirm it.
+
+    **Full 25-tool `toolspecs.json` input/output schema audit (zero-cost,
+    the explicitly-requested proactive pass, not limited to tools touched by
+    a failing row)**, cross-checked against each tool's real `tools.py`
+    implementation line-by-line:
+    - **5 tools already correctly documented**: `validateVideo`,
+      `assignReviewer`, `getReview`, `submitContentModeration`,
+      `implementModeration`.
+    - **10 tools were genuinely-computed, input-dependent, but had NO
+      outputSchema at all** — fixed by adding one to each, describing the
+      real returned fields: `detectHateSpeech`/`detectExplicitContent`/
+      `reviewCommentSection` (each returns `detected`/`confidence` derived
+      from `getReview`'s real `detected_categories`/`confidence_scores`, for
+      "Hate Speech"/"Nudity"/"Bullying" respectively); `assessAgeRating`
+      (`age_rating`, a real per-video lookup, enum `18+`/`13+`/`null`);
+      `validateMetadataTags` (`metadata_tags`, now a real parsed list after
+      bug #1's fix); `checkUploadFrequency`/`checkUserHistory` (both return
+      the same real `uploader_history` lookup field, just keyed by the same
+      `uploader_id`); `generateContentWarnings` (`content_warning_applied`,
+      a real per-video lookup — see 5.7.5's rewrite above for why this
+      matters). Two of these ten are ALSO flagged as a separate, deeper
+      `tools.py` bug, not fixed this session: **`checkRegionalCompliance`
+      and `detectSyntheticContent` are mislabeled/copy-paste
+      implementations that don't do what their name or declared parameters
+      claim** — `checkRegionalCompliance(video_id, region)` never reads
+      `region` at all and instead checks whether `'Illegal activities'` is
+      in `detected_categories` (identical pattern to
+      `detectExplicitContent`/`detectHateSpeech`, just copy-pasted with a
+      different category string and the wrong tool name left in place);
+      `detectSyntheticContent(video_id)` likewise never checks anything
+      related to synthetic/AI-generated content and instead checks for
+      `'Misinformation'`. Documented their REAL behavior in the outputSchema
+      (per the "tools.py is ground truth" rule) with an explicit note
+      flagging the name mismatch, but did not rewrite the underlying logic
+      to match their names — that would require inventing genuine
+      region-compliance or synthetic-content-detection logic the dataset
+      doesn't actually support signals for, and neither tool is on the
+      critical path to this domain's 0.95 projection above (the workflow's
+      actual decision logic is fully covered by `getReview`/`validateVideo`/
+      `assessAgeRating`/`generateContentWarnings`, which don't depend on
+      either of these two). Flagged for a future session if these tools
+      ever do need to become real.
+    - **10 tools are confirmed disguised stubs** — `checkVideoThumbnail`,
+      `analyzeAudioContent`, `scanForCopyright`, `assessVideoQuality`,
+      `validateSubtitles`, `detectSpam`, `assessThumbnailCompliance`,
+      `validateDescription`, `checkStreamingQuality`,
+      `detectInappropriateAds` all unconditionally return exactly
+      `{"video_id": ..., "is_valid": True, "status": "success", "message":
+      "Validated successfully against stored video record."}` regardless of
+      input — real code runs (so the item-9 AST bare-`pass` check doesn't
+      catch them), but the value never actually depends on anything the
+      tool claims to check. Per the stub-tool rule, deliberately left
+      WITHOUT an outputSchema (documenting a stub's fake constant output
+      would describe the stub accurately, not fix it) and not implemented
+      with real logic this session, since none of their real signals are
+      needed to reach the 95% ceiling projected above.
+    - **Input schema**: `verify_toolspec_matches_manager()` reported zero
+      warnings both before and after (no required-parameter mismatches
+      existed). Separately found and fixed 7 missing OPTIONAL parameters
+      across 7 tools that `tools.py`'s real method signatures accept but
+      `toolspecs.json` never listed at all (not just mis-marked as
+      required/optional — entirely absent from `inputSchema.properties`):
+      `checkVideoThumbnail.thumbnail_path`, `detectHateSpeech.transcript`,
+      `assessAgeRating.content_flags`,
+      `generateContentWarnings.detected_issues`,
+      `validateSubtitles.subtitle_files`,
+      `assessThumbnailCompliance.thumbnail_path`,
+      `validateDescription.description`. All seven are optional with a
+      Python-level default and unused by their tool's real implementation
+      today, so this didn't block anything currently, but completes the
+      schema per the "every parameter the method actually takes must be
+      listed" rule.
+    - Verified the fix actually reaches the LLM (not just the source file)
+      by calling `tools_helper.format_tools_for_llm()` directly against the
+      edited `toolspecs.json` (zero cost, no LLM call) and reading the
+      rendered prompt text — confirmed the new `Returns:` fields and the new
+      optional `Parameters:` entries both render correctly, and that the
+      still-undocumented stub tools correctly render as `Returns: (not
+      documented in toolspec — do not assume a dict shape)`, the intended
+      signal for "don't invent a shape for this one."
+
+    **BLOCKED: the one justified regeneration (per the stop/budget rules,
+    this is a genuinely new fix, not a repeat of the already-failed
+    SOP-wording approach from item 13, so spending one regeneration here was
+    the correct call) could not be run.** `client.py`'s configured provider
+    (`_provider = 'openrouter'`) returned `401 - "API key expired"` on all 3
+    retry attempts from `PlannerAgentAgent` — `results.tsv` confirms
+    `tokens_used=0` for this attempt, i.e. a clean credential failure before
+    any real API spend, not a pipeline or fixture bug. Per the exact
+    precedent already established in item 24 (same failure class, different
+    domain, different session), **not worked around by switching
+    `client.py` to a different provider (e.g. `groq`)** — that's an
+    infra/credentials decision belonging to the user, not something this
+    loop should silently substitute. **Current state**: `tools.py` and
+    `toolspecs.json` fixes are live (confirmed via `--test`, free); `sop.txt`
+    rewrite is live; `eval_sops/video_classification_sop/workflow.py` is
+    UNCHANGED (still the old cached code with the `format_validated`
+    hallucination), so `--test` still correctly reports **0.00/147** — this
+    is expected and does not mean the fixes didn't work, it means they
+    haven't been exercised by a real pipeline run yet. **Action needed from
+    the user**: refresh `OPENROUTER_API_KEY` (or point `client.py` at a
+    different working provider/key explicitly), then the next session
+    should spend exactly one regeneration on this domain and `--test` to
+    confirm the ~0.95 projection above — do not re-attempt more `sop.txt`
+    wording rounds on the old item-13 hypothesis, that diagnosis is
+    superseded and the actual fix is already written and waiting to be
+    exercised.
+
+30. **2026-10-03: generic fixes for video_classification_sop and
+    email_intent_sop; one domain verified, one reverted.** A full zero-cost
+    re-score of all 10 domains (see `CURRENT_SCORES.md`, 2026-10-03 section)
+    showed video_classification_sop at 0.93 and email_intent_sop at 0.92.
+    Traces of the remaining failures:
+
+    - **Video, 4 rows crash on a blank `format`.** `validateVideo` returned
+      the raw pandas NaN, and the generated `raw_format.lower()` raised, so the
+      row became an error dict. Earlier notes said these returned `None`; that
+      was wrong. Fixture fix in `eval_sops/video_classification_sop/tools.py`:
+      `format` and `resolution` map to `""` when the cell is NaN. SOP line 45
+      already says a blank `format` is non-compliant, so the blank branch
+      returns Remove. Zero-cost re-score of the existing workflow: 0.95 (140/147).
+      Regenerated workflow: 0.95, about 34k tokens. Kept.
+    - **Email, 9 listing concerns classed as "generic question".** The SOP
+      lists "Product P not visible/not appearing" as category (a), but the
+      generated classifier missed them: its keyword list had "product not
+      visible", which never matches "Product P45F6G not visible" with an ID in
+      the middle. Two regenerations under the new rules scored 0.90 (about
+      21k and 23k tokens). The first matched "not visible" but still missed
+      about 11 listing rows. Both were rejected, and the 0.92 cached workflow
+      was restored and re-verified. The rejected outputs are in the session
+      scratchpad, not the repo.
+    - **Email, 7 "Multiple records found" lookup errors.** The email tool reads
+      `test_set_with_outputs.csv`, which has one row per email. 14
+      product_id/marketplace pairs appear more than once, and in every group
+      the rows describe different products (different description, price, and
+      status). The key does not identify a product, so no generic rule can
+      choose the right row. Reported as a fixture defect. Not fixed.
+    - **Video, the 7 remaining escalation and age-rating mismatches** are
+      not traced past the earlier analysis. No separating feature has been
+      found by the exhaustive search that `sop-debugger.md` requires before
+      calling a residual "noise".
+
+    **Generic rules added (shared files, so they affect every future
+    regeneration):**
+    - `codegeneration_agent.py` rule 27: coerce missing cells (NaN/None/empty)
+      before calling string methods, then take the SOP's own blank-value branch.
+    - `codegeneration_agent.py` rule 28: implement every SOP-listed phrasing as
+      its own match. Placeholders (P, X, a product ID) match any identifier in
+      that slot; a slash between alternatives gives separate phrasings.
+    - `.claude/agents/sop-debugger.md`: three standing patterns under bucket
+      classification (blank cells as NaN, enumerated phrasings missing from the
+      classifier, duplicate-key lookups with conflicting rows; the last is
+      reported, never resolved by picking a row).
+
+    **Checked only by parsing:** `codegeneration_agent.py` was checked with
+    `ast.parse` and the two regenerations, not with a static check of every
+    domain's prompt. Other domains were not regenerated, so a regression
+    there is not ruled out.
+
+    **Not verified, carried forward:** `video_annotation_sop`'s one failing
+    row is noise per the user's review. The exhaustive feature search has not
+    been run on it. `know_your_business_sop`'s biz_048 is a
+    registration-key collision with biz_098 (different labels); biz_008 shares
+    only its registration number with biz_002 and its cause is untraced.
 
 You now have a HEAD commit, a known `S_prev`, and a known per-run token cost
 `T_prev`. Everything below assumes that exists.

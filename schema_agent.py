@@ -462,6 +462,35 @@ Rules:
     # OUTPUT GUARDRAILS
     # =========================================================================
 
+    def _unsourced_required_params(self, state: SOPConverterState) -> set:
+        """
+        Required tool parameters that no tool in the plan returns. Each one can
+        only come from the caller, so it must be an input_schema entry.
+        """
+        tools_by_name = {t["name"]: t for t in state.get("tools", []) if isinstance(t, dict)}
+        plan_tool_names = {step["tool"] for step in state["api_plan"] if step.get("tool")}
+
+        required_names = set()
+        returned_names = set()
+        for name in plan_tool_names:
+            tool = tools_by_name.get(name)
+            if not tool:
+                continue
+            for pname, pspec in tool.get("parameters", {}).items():
+                if not (isinstance(pspec, dict) and pspec.get("required") is False):
+                    required_names.add(pname)
+            returns = tool.get("returns")
+            if isinstance(returns, dict):
+                returned_names.update(returns.keys())
+        return required_names - returned_names
+
+    @staticmethod
+    def _mentioned_in_sop(name: str, sop_text: str) -> bool:
+        """True if the parameter name appears in the SOP, treating _ and spaces alike."""
+        def norm(s: str) -> str:
+            return " ".join(s.lower().replace("_", " ").split())
+        return norm(name) in norm(sop_text)
+
     def _validate_output(
         self, input_schema: list, state: SOPConverterState
     ) -> list:
@@ -471,6 +500,22 @@ Rules:
             raise SchemaAgentError(
                 "Output guardrail: LLM returned an empty schema. "
                 "Every workflow needs at least one input parameter."
+            )
+
+        # A required tool parameter that no tool returns and the SOP never names
+        # has no other source than input_data. Dropping one makes every row fail
+        # the tool call, so reject the output and let the retry loop regenerate.
+        schema_names = {p.get("name") for p in input_schema if isinstance(p, dict)}
+        unsourced_missing = sorted(
+            pname for pname in self._unsourced_required_params(state)
+            if pname not in schema_names
+            and not self._mentioned_in_sop(pname, state.get("sop", ""))
+        )
+        if unsourced_missing:
+            raise SchemaAgentError(
+                f"Output guardrail: required tool parameter(s) {unsourced_missing} "
+                f"are not returned by any tool and are not named in the SOP, so "
+                f"they must be input parameters."
             )
 
         if len(input_schema) > self.MAX_PARAMS:

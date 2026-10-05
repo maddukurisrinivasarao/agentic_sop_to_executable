@@ -5,130 +5,120 @@ def workflow(input_data):
     try:
         manager = get_manager_instance()
 
-        # Step 1: Validate video format and extract technical metadata
-        video_validation = manager.validateVideo(
+        # Step 1: Validate video technical metadata (VVP) and compute format_validated
+        validation = manager.validateVideo(
             video_id=input_data["video_id"],
-            video_path=input_data["video_path"]
+            video_path=input_data["video_path"],
+        )
+        # Normalize codec string
+        raw_format = validation.get("format", "")
+        fmt = "" if raw_format is None else str(raw_format).lower().replace(" ", "").replace(".", "").replace("-", "")
+        codec_supported = fmt in {"mp4", "h264", "hevc"}
+        # Parse resolution and check size
+        res_str = validation.get("resolution", "")
+        res_ok = False
+        if isinstance(res_str, str):
+            parts = res_str.lower().split("x")
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                width = int(parts[0])
+                height = int(parts[1])
+                if width * height >= 1280 * 720:
+                    res_ok = True
+        format_validated = codec_supported and res_ok
+
+        # Early termination if technical validation fails
+        if not format_validated:
+            return {
+                "escalated": False,
+                "moderation_actions": [],
+                "content_warning_applied": False,
+                "final_decision": "Remove",
+            }
+
+        # Step 2: Retrieve uploader history (optional, not used later)
+        uploader_history_resp = manager.checkUserHistory(
+            uploader_id=validation.get("uploader_id")
         )
 
-        # Step 2: Validate metadata tags
-        metadata_validation = manager.validateMetadataTags(
-            video_id=input_data["video_id"],
-            metadata_tags=input_data["metadata_tags"]
+        # Step 3: Assign initial reviewer based on language and region
+        reviewer_assign = manager.assignReviewer(
+            video_id=validation.get("video_id"),
+            video_language=validation.get("video_language"),
+            region=validation.get("region")
         )
+        initial_reviewer_id = reviewer_assign.get("initial_reviewer_id")
 
-        # Step 3: Check uploader's historical behavior
-        user_history = manager.checkUserHistory(
-            uploader_id=input_data["uploader_id"]
-        )
-
-        # Step 4: Assign an initial reviewer based on language and region
-        reviewer_assignment = manager.assignReviewer(
-            video_id=input_data["video_id"],
-            video_language=input_data["video_language"],
-            region=input_data["region"]
-        )
-        initial_reviewer_id = reviewer_assignment["initial_reviewer_id"]
-
-        # Step 5: Fetch initial review results
-        review_result = manager.getReview(
-            video_id=input_data["video_id"],
+        # Step 4: Fetch review results
+        review = manager.getReview(
+            video_id=validation.get("video_id"),
             initial_reviewer_id=initial_reviewer_id
         )
-        detected_categories = review_result.get("detected_categories", [])
-        confidence_scores = review_result.get("confidence_scores", [])
+        detected_categories = review.get("detected_categories", [])
+        confidence_scores = review.get("confidence_scores", [])
 
-        # Determine escalation (ETM) – triggered when there is at least one detected category
-        escalated = bool(detected_categories)
+        # Step 5: Determine escalation (ETM) and possibly submit moderation
+        escalated = False
+        moderation_actions = []
+        if detected_categories and confidence_scores:
+            max_conf = max(confidence_scores) if confidence_scores else 0
+            if max_conf > 0.70:
+                escalated = True
+                # Submit content moderation record
+                submit_resp = manager.submitContentModeration(
+                    video_id=validation.get("video_id"),
+                    initial_reviewer_id=initial_reviewer_id
+                )
+                moderator_id = submit_resp.get("moderator_id")
+                # Implement moderation actions
+                manager.implementModeration(
+                    video_id=validation.get("video_id"),
+                    moderator_id=moderator_id
+                )
+                # Apply Moderation Action Matrix (MAM) based on categories
+                cat_set = set(detected_categories)
+                if {"Hate Speech", "Illegal activities", "Misinformation", "Nudity"} & cat_set:
+                    moderation_actions = ["Remove", "Strike Issued"]
+                elif detected_categories == ["Violence"]:
+                    moderation_actions = ["Age Restrict", "Warning"]
+                elif detected_categories == ["Bullying"]:
+                    moderation_actions = ["Remove", "Warning"]
+                else:
+                    # No explicit rule; keep empty list
+                    moderation_actions = []
+        # If not escalated, moderation_actions stays empty
 
-        # Conditional Step 6: Record moderation findings if escalation is required
-        if escalated:
-            moderation_record = manager.submitContentModeration(
-                video_id=input_data["video_id"],
-                initial_reviewer_id=initial_reviewer_id
-            )
-            moderator_id = moderation_record["moderator_id"]
-            # Step 7: Implement moderation decision
-            moderation_implementation = manager.implementModeration(
-                video_id=input_data["video_id"],
-                moderator_id=moderator_id
-            )
-        # No escalation – skip submitContentModeration and implementModeration
-
-        # Step 8: Assess appropriate age rating
-        manager.assessAgeRating(video_id=input_data["video_id"])
-
-        # Step 9: Generate content warning flag
-        manager.generateContentWarnings(video_id=input_data["video_id"])
-
-        # Step 10: Verify regional compliance
-        manager.checkRegionalCompliance(
-            video_id=input_data["video_id"],
-            region=input_data["region"]
+        # Step 6: Retrieve content warning flag
+        warning_resp = manager.generateContentWarnings(
+            video_id=validation.get("video_id")
         )
+        content_warning_applied = warning_resp.get("content_warning_applied", False)
 
-        # Step 11: Detect explicit visual content
-        manager.detectExplicitContent(video_id=input_data["video_id"])
+        # Step 7: Retrieve pre-recorded age rating
+        age_resp = manager.assessAgeRating(
+            video_id=validation.get("video_id")
+        )
+        age_rating = age_resp.get("age_rating")
 
-        # Step 12: Detect hate speech in audio/video
-        manager.detectHateSpeech(video_id=input_data["video_id"])
-
-        # Step 13: Analyze audio track for violations
-        manager.analyzeAudioContent(video_id=input_data["video_id"])
-
-        # Step 14: Check video thumbnail compliance
-        manager.checkVideoThumbnail(video_id=input_data["video_id"])
-
-        # Step 15: Scan for copyright infringements
-        manager.scanForCopyright(video_id=input_data["video_id"])
-
-        # Step 16: Detect synthetic (AI‑generated) content
-        manager.detectSyntheticContent(video_id=input_data["video_id"])
-
-        # Step 17: Assess overall video quality
-        manager.assessVideoQuality(video_id=input_data["video_id"])
-
-        # Step 18: Validate subtitles for compliance
-        manager.validateSubtitles(video_id=input_data["video_id"])
-
-        # Step 19: Review comment section for policy violations
-        manager.reviewCommentSection(video_id=input_data["video_id"])
-
-        # Step 20: Detect spam content or behavior
-        manager.detectSpam(video_id=input_data["video_id"])
-
-        # Step 21: Assess thumbnail compliance with regional rules
-        manager.assessThumbnailCompliance(video_id=input_data["video_id"])
-
-        # Step 22: Validate video description text
-        manager.validateDescription(video_id=input_data["video_id"])
-
-        # Step 23: Check streaming quality metrics
-        manager.checkStreamingQuality(video_id=input_data["video_id"])
-
-        # Step 24: Detect inappropriate advertisements
-        manager.detectInappropriateAds(video_id=input_data["video_id"])
-
-        # Step 25 (original Step 8): Generate content warning flag (simple rule: warning if escalated)
-        content_warning_applied = escalated
-
-        # Step 26 (original Step 9): Determine final decision
-        format_validated = str(input_data["format_validated"]).strip().lower() == "true"
+        # Step 8: Determine final decision per SOP hierarchy
         if not format_validated:
             final_decision = "Remove"
         elif escalated:
-            final_decision = "Remove"
+            if detected_categories == ["Violence"]:
+                final_decision = "Age Restrict"
+            else:
+                final_decision = "Remove"
         else:
-            final_decision = "Allow"
+            if age_rating == "13+":
+                final_decision = "Age Restrict"
+            else:
+                final_decision = "Allow"
 
-        # Step 27 (original Step 10): Assemble moderation actions list (empty if no escalation)
-        moderation_actions = []  # No explicit actions derived from tools in this simplified flow
-
+        # Combine results into output
         return {
             "escalated": escalated,
             "moderation_actions": moderation_actions,
             "content_warning_applied": content_warning_applied,
-            "final_decision": final_decision
+            "final_decision": final_decision,
         }
 
     except Exception as e:

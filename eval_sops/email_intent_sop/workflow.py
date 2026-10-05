@@ -5,87 +5,99 @@ def workflow(input_data):
     try:
         manager = get_manager_instance()
 
-        # Step 1: Extract product_id from email_body using simple token inspection
-        email_body = input_data["email_body"]
-        tokens = email_body.replace("\n", " ").split()
-        extracted_product_id = None
-        for token in tokens:
-            # Strip common punctuation
-            clean_token = token.strip(".,;:!?)('\"")
-            if len(clean_token) == 6 and clean_token.startswith("P") and clean_token.isalnum():
-                extracted_product_id = clean_token
+        # Step 1: Extract product_id from email_body using simple token parsing
+        raw_body = "" if (input_data.get("email_body") is None) else str(input_data["email_body"])
+        tokens = raw_body.replace("\n", " ").replace("\r", " ").split()
+        extracted_product_id = ""
+        for tok in tokens:
+            cleaned = tok.strip('.,;:!?"\'()[]{}')
+            if len(cleaned) == 6 and cleaned.upper().startswith("P") and cleaned.isalnum():
+                extracted_product_id = cleaned.upper()
                 break
-        # Fallback to the provided product_id if extraction failed
-        if not extracted_product_id:
-            extracted_product_id = input_data["product_id"]
+
+        # Use the extracted product_id; if none found, fall back to input product_id
+        product_id = extracted_product_id if extracted_product_id else input_data["product_id"]
 
         # Step 2: Determine seller intent based on email content
-        lower_body = email_body.lower()
+        lower_body = raw_body.lower()
 
-        # Pricing concern detection
-        if "price" in lower_body:
+        # Helper flags
+        has_price = "price" in lower_body
+        has_description = "description" in lower_body
+        # Listing‑not‑listed indicative phrases
+        listing_phrases = [
+            "not listed",
+            "not showing",
+            "not visible",
+            "not appearing",
+            "can't find",
+            "cannot find",
+            "cant find",
+        ]
+        has_listing_phrase = any(phrase in lower_body for phrase in listing_phrases)
+
+        # Does the body mention the product id (any case)?
+        mentions_product = product_id.lower() in lower_body
+
+        if has_price:
             seller_intent = "concern about incorrect pricing"
-            action = "update price"
-        # Description concern detection
-        elif "description" in lower_body:
+        elif has_description:
             seller_intent = "concern about incorrect description"
-            action = "update description"
-        # Listing not listed detection (various phrasing cues)
-        elif any(phrase in lower_body for phrase in [
-            "not listed", "not showing", "not appearing",
-            "can't find", "cannot find", "product not visible",
-            "product not showing", "why isnt", "why is", "why isn't", "why is"
-        ]):
+        elif mentions_product and has_listing_phrase:
             seller_intent = "concern about their product not being listed"
-            action = "share listing status"
-        # Generic question fallback (email mentions the product but none of the above)
-        elif extracted_product_id and extracted_product_id in email_body:
+        elif mentions_product:
             seller_intent = "generic question about a listing"
-            action = "no action"
-        # Unable to decide fallback
         else:
             seller_intent = "unable to decide"
-            action = "further clarification required"
 
-        # Step 3: Fetch additional data based on intent when required
+        # Step 3: Map intent to action
+        intent_action_map = {
+            "concern about their product not being listed": "share listing status",
+            "concern about incorrect pricing": "update price",
+            "concern about incorrect description": "update description",
+            "generic question about a listing": "no action",
+            "unable to decide": "further clarification required",
+        }
+        action = intent_action_map.get(seller_intent, "further clarification required")
+
+        # Step 4: Retrieve additional data based on intent
         price_info = None
         description_info = None
         listing_status_info = None
-        inventory_info = None
+        inventory_status_info = None
 
         if seller_intent == "concern about incorrect pricing":
             price_info = manager.get_product_price(
-                product_id=extracted_product_id,
-                marketplace_id=input_data["marketplace_id"]
+                product_id=product_id,
+                marketplace_id=input_data["marketplace_id"],
             )
         elif seller_intent == "concern about incorrect description":
             description_info = manager.get_product_description(
-                product_id=extracted_product_id
+                product_id=product_id,
             )
         elif seller_intent == "concern about their product not being listed":
             listing_status_info = manager.get_product_listing_status(
-                product_id=extracted_product_id,
+                product_id=product_id,
                 marketplace_id=input_data["marketplace_id"],
-                include_history=False
+                include_history=False,
             )
-            inventory_info = manager.get_inventory_status(
-                product_id=extracted_product_id,
+            inventory_status_info = manager.get_inventory_status(
+                product_id=product_id,
                 marketplace_id=input_data["marketplace_id"],
-                include_forecasts=False
+                include_forecasts=False,
             )
-        # No external calls needed for generic or unable intents
+        # No external calls needed for generic question or unable to decide
 
-        # Combine every step's result the SOP's Output section names as fields
+        # Combine results for final output
         return {
             "email_id": input_data["email_id"],
-            "product_id": extracted_product_id,
+            "product_id": product_id,
             "seller_intent": seller_intent,
             "action": action,
-            # Optional inclusion of fetched data for completeness
             "price_info": price_info,
             "description_info": description_info,
             "listing_status_info": listing_status_info,
-            "inventory_info": inventory_info
+            "inventory_status_info": inventory_status_info,
         }
 
     except Exception as e:
