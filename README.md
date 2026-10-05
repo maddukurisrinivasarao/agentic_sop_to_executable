@@ -145,7 +145,9 @@ it:
 |---|---|---|
 | `prepare.py` | `eval_sops/`<br>`tools_helper.py`<br>`global_tool_functions.py` | Fixed setup and data — never edited by the agent. |
 | `train.py` | `planner_agent.py`<br>`schema_agent.py`<br>`codegeneration_agent.py`<br>`validation_agent.py`<br>`orchestrator_agent.py`<br>`agent_pipeline.py`<br>`client.py` | The system being improved — edited every experiment. |
-| `program.md` | [program.md](program.md)<br>[sop_autoresearch.md](sop_autoresearch.md) | Agent instructions. His single file covers both "what the system is" and "how to run experiments" — this repo splits them: `program.md` covers the former, `sop_autoresearch.md` the latter. |
+| `program.md` | [program.md](program.md) | Architecture and conventions of the system. Karpathy's single file covers both "what the system is" and "how to run experiments"; this repo keeps the former here. |
+| `program.md` (the "how to run experiments" half) | [.claude/agents/sop-debugger.md](.claude/agents/sop-debugger.md) | Agent instructions: triage rules, root-cause buckets, budgets, stop conditions. The coding agent that runs the loop reads this file. |
+| Experiment log (results and findings) | [sop_autoresearch.md](sop_autoresearch.md)<br>[CURRENT_SCORES.md](CURRENT_SCORES.md) | Memory the agent reads before starting and appends to as it works. |
 
 One thing has no direct peer: **[test_harness.py](test_harness.py)**. In
 autoresearch-macos, `train.py` scores itself — it trains *and* prints
