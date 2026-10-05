@@ -6,9 +6,9 @@ multi-agent [LangGraph](https://github.com/langchain-ai/langgraph) pipeline
 that plans, generates, validates, and self-corrects the code it writes.
 
 ```
-SOP text + toolspecs.json  ─▶  Planner ─▶ Schema ─▶ Generator ─▶ Validator ─▶ Orchestrator
-                                                          ▲                        │
-                                                          └──────── retry ─────────┘
+SOP text + toolspecs.json  ─▶  Planner ─▶ Plan-diff check ─▶ Schema ─▶ Generator ─▶ Validator ─▶ Orchestrator
+                                  ▲                               ▲             ▲                       │
+                                  └──── retry planner ────────────┴─ retry schema ┴── retry generator ───┘
                                                                      │
                                                           complete / failed ─▶ workflow.py
 ```
@@ -23,10 +23,11 @@ together as a LangGraph state graph in
 | Agent | File | Responsibility |
 |---|---|---|
 | **Planner** | [planner_agent.py](planner_agent.py) | Reads the SOP + available tools, produces an ordered `api_plan` (which tool to call, in what order). |
-| **Schema** | [schema_agent.py](schema_agent.py) | Determines the base-level input parameters the workflow needs from the caller (i.e. values that aren't produced by an earlier step). |
+| **Plan-diff check** | [plan_diff_checker.py](plan_diff_checker.py) | On a planner retry, compares the new plan with the previous one and fails the run if the plan is unchanged. |
+| **Schema** | [schema_agent.py](schema_agent.py) | Determines the base-level input parameters the workflow needs from the caller (i.e. values that aren't produced by an earlier step). An output guardrail rejects a schema that omits a required tool parameter which no tool returns and the SOP never names. |
 | **Code Generator** | [codegeneration_agent.py](codegeneration_agent.py) | Generates a single Python `workflow(input_data)` function that calls the planned tools via `global_tool_functions.get_manager_instance()`. |
 | **Validator** | [validation_agent.py](validation_agent.py) | Statically checks the generated code (AST parse, banned-pattern scan for `eval`/`exec`/`os.system`/etc.) and asks the LLM to review it for logical correctness. |
-| **Orchestrator** | [orchestrator_agent.py](orchestrator_agent.py) | Reads the validation report, classifies issues by severity, and decides whether to `retry` (with feedback fed back into the Generator), mark `complete`, or `failed` (unrecoverable issue or retry budget exhausted). |
+| **Orchestrator** | [orchestrator_agent.py](orchestrator_agent.py) | Reads the validation report, classifies issues by severity, and decides whether to mark `complete`, mark `failed` (unrecoverable issue or retry budget exhausted), or `retry`. A retry targets the generator by default, or the schema or planner when the issue history shows the problem is upstream (for example, the same issue keeps recurring after a generator retry). |
 
 Every agent also enforces its own **input/output guardrails** (schema checks,
 prompt-injection heuristics, retry-with-backoff on transient LLM failures,
@@ -44,6 +45,7 @@ and selectable by changing `_provider`).
 agent_pipeline.py         LangGraph wiring — the SOPToCodeConverter entry point
 sop_state.py               Shared TypedDict state passed between agents
 planner_agent.py           Agent 1: SOP -> ordered API plan
+plan_diff_checker.py       Plan-diff check between planner retries
 schema_agent.py             Agent 2: API plan -> required input schema
 codegeneration_agent.py     Agent 3: plan + schema -> Python workflow() code
 validation_agent.py         Agent 4: static + LLM review of generated code
@@ -87,18 +89,29 @@ This writes the generated code to `path/to/your_sop_dir/workflow.py`.
 
 ### Run the benchmark harness
 
-[test_harness.py](test_harness.py) runs the pipeline against every domain
-directory under `eval_sops/`, executes each generated `workflow()` against
+[test_harness.py](test_harness.py) runs the pipeline against domain
+directories under `eval_sops/`, executes each generated `workflow()` against
 that domain's held-out test rows, scores it against ground truth, and
 appends one row per domain to `results.tsv`:
 
 ```bash
-python test_harness.py
+python test_harness.py --domains customer_service_sop,email_intent_sop
 ```
 
-Each row records the git commit, domain, whether generation completed,
-retry count, and row-level pass rate, so `results.tsv` doubles as a
-before/after log across code changes to the pipeline.
+Select domains with `--domains` (comma-separated). Without it, the harness
+uses `DEFAULT_DOMAINS` in `test_harness.py`, which is currently a single
+domain, so a bare `python test_harness.py` does not score every domain.
+
+To re-score the cached `workflow.py` of each domain without calling the LLM
+at all (zero tokens, and no row is appended to `results.tsv`):
+
+```bash
+python test_harness.py --domains customer_service_sop --test
+```
+
+Each row recorded in `results.tsv` includes the git commit, domain, whether
+generation completed, retry count, and row-level pass rate, so `results.tsv`
+doubles as a before/after log across code changes to the pipeline.
 
 > This repo does not include an `eval_sops/` dataset — it's ignored via
 > `.gitignore` since SOP-Bench-style benchmark data is typically distributed
@@ -139,6 +152,16 @@ autoresearch-macos, `train.py` scores itself — it trains *and* prints
 `val_bpb` in the same run. Here, the "model" is split across seven files
 that can't score themselves, so `test_harness.py` exists purely to run the
 pipeline against `eval_sops/` and measure `row_pass_rate`.
+
+The coding agent that runs this loop is defined in
+[.claude/agents/sop-debugger.md](.claude/agents/sop-debugger.md). It is a
+Claude Code sub-agent, not a pipeline agent. It reads
+[sop_autoresearch.md](sop_autoresearch.md) (the findings log) and
+[CURRENT_SCORES.md](CURRENT_SCORES.md) (the last verified scores) before it
+starts, then fixes the most durable layer first: the SOP text, then the
+toolspecs and `tools.py`, then shared agent code only when a bug is systematic
+across domains. It checks every change with the zero-cost `--test` run before
+regenerating.
 
 Budgeting is token-based rather than a fixed experiment count — see
 `sop_autoresearch.md` Section 2 — since a single `test_harness.py` pass across all
