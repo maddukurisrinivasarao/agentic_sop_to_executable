@@ -1,12 +1,14 @@
 # SOP-to-Executable: Fix History & Architecture
 
-Sep 30, 2026 · @srini
+Sep 30, 2026 · updated Oct 4, 2026 · @srini
 
-Full fix history across all 10 SOP-Bench domains and the shared LangGraph pipeline that converts each domain's plain-English SOP into an executable `workflow()` function, run against commit `1977b9c` and this session's uncommitted `eval_sops/` fixture state (2026-09-30).
+Fix history across the 10 SOP-Bench domains and the shared LangGraph pipeline that converts each domain's plain-English SOP into an executable `workflow()` function. Updated on `main` at commit `da694c4`. Domain sections record the score at the time of each section; the **Current scores** table below is the latest. `content_flagging_sop` is outside the regeneration scope of the latest passes and remains a documented structural limitation.
 
 ## Architecture
 
-For every domain, four LangGraph agents turn a plain-English SOP plus a toolspec and a Python tool implementation into one generated `workflow()` function, which a test harness scores against a held-out CSV. All durable fixes land in the fixture layer at the top (SOP text, tools.py, toolspecs.json) or in the shared agent prompts — never as a one-off edit to generated code, since that doesn't survive the next regeneration.
+For every domain, a LangGraph pipeline turns a plain-English SOP plus a toolspec and a Python tool implementation into one generated `workflow()` function, which a test harness scores against a held-out CSV. The pipeline runs planner → plan-diff check → schema → generator → validator → orchestrator, and the orchestrator can send a retry back to the planner, the schema, or the generator. The schema agent has an output guardrail that rejects an input schema which omits a required tool parameter that no tool returns and the SOP never names.
+
+A separate Claude Code sub-agent, `sop-debugger` (`.claude/agents/sop-debugger.md`), runs the debug loop. Before every regeneration pass it runs a toolspec gate: every tool needs a non-empty output schema, and input and output schemas must describe every nesting level. All durable fixes land in the fixture layer at the top (SOP text, tools.py, toolspecs.json) or in the shared agent prompts — never as a one-off edit to generated code, since that doesn't survive the next regeneration.
 
 &#91;embedded content: pipeline: fixtures → 4 LangGraph agents → generated workflow.py → test harness → debug loop back to fixtures\]
 
@@ -14,20 +16,24 @@ For every domain, four LangGraph agents turn a plain-English SOP plus a toolspec
 
 All scores are full-dataset, zero-cost `python test_harness.py --domains <name> --test` re-scores of each domain's cached `workflow.py` — not a sample. The target bar was raised from 0.8 to 0.95 on 2026-09-29 once several domains proved 0.8 was reachable with pure fixture fixes.
 
-| Domain | Rows | Score | Bar (0.95) |
-| --- | --- | --- | --- |
-| aircraft\_inspection\_sop | 112 | 1.00 | met |
-| patient\_intake\_sop | 66 | 1.00 | met |
-| dangerous\_goods\_sop | 274 | 1.00 | met |
-| warehouse\_package\_inspection\_sop | 150 | 1.00 | met |
-| video\_annotation\_sop | 125 | 0.99 | met (1 noise row) |
-| email\_intent\_sop | 186 | 0.92 | not met (ceiling) |
-| customer\_service\_sop | 156 | 1.00 | met |
-| know\_your\_business\_sop | 90 | 0.80 | not met |
-| content\_flagging\_sop | 168 | 0.00 | not met |
-| video\_classification\_sop | 147 | 0.00 | not met |
+Latest run: 2026-10-04, re-scored on `main` at `da694c4`.
 
-8 of 10 domains are now at or above the 0.95 target, including customer\_service\_sop's first-ever perfect score. The two 0.00 domains remain documented structural limitations (a data/ground-truth problem and a validator-vs-SOP conflict, neither fixable by prompt/toolspec changes). know\_your\_business\_sop sits at a documented noise ceiling. email\_intent\_sop sits just under the bar at its own documented ceiling — a duplicate-key data collision that needs a new tool capability, not a prompt fix.
+| Domain | Pass / rows | Score | Bar (0.95) | Notes |
+| --- | --- | --- | --- | --- |
+| aircraft\_inspection\_sop | 112 / 112 | 1.00 | met | |
+| customer\_service\_sop | 156 / 156 | 1.00 | met | |
+| dangerous\_goods\_sop | 274 / 274 | 1.00 | met | |
+| patient\_intake\_sop | 66 / 66 | 1.00 | met | |
+| warehouse\_package\_inspection\_sop | 150 / 150 | 1.00 | met | |
+| video\_annotation\_sop | 124 / 125 | 0.99 | met | one row treated as label noise, not yet verified by a feature search |
+| know\_your\_business\_sop | 88 / 90 | 0.98 | met on edited labels | 0.80 on the original labels; the label edit is pending a decision |
+| video\_classification\_sop | 139 / 147 | 0.946 | not met (just under) | was 140/147 on the cached file before the latest regeneration |
+| email\_intent\_sop | 173 / 186 | 0.93 | not met | 8 listing-concern rows missed by the classifier; 5 duplicate-ID lookup errors |
+| content\_flagging\_sop | 168 / 168 | 0.00 | not met | structural limitation (formula gaps, sign inversion); outside the latest regeneration scope |
+
+Totals across all 10 domains: 1,282 of 1,474 rows pass (0.87, pooled).
+
+7 of the 9 in-scope domains (excluding content\_flagging\_sop) are at or above 0.95 on today's files. The two below the bar have documented causes: video\_classification\_sop's remaining failures are mostly label-versus-SOP conflicts, and email\_intent\_sop's are a classifier gap plus a duplicate-ID data defect. Neither is fixable by a generic rule alone. content\_flagging\_sop's 0.00 is a documented structural limitation, not a regression.
 
 ## Cross-cutting pipeline fixes
 
@@ -202,7 +208,36 @@ Each domain's SOP text, `tools.py`, and `toolspecs.json` live under `eval_sops/<
 6. **2026-09-27 — Triage pass.** `video_annotation_sop` onboarded as a 6th domain; a "per-domain triage" process documented, noting 4 more domains existed only in a dataset manifest, not as real folders yet.
 7. **2026-09-28 — The major consolidated fix session.** Fixed the broken OpenRouter/Ollama routing; added client timeouts; rewrote the schema agent's parameter-detection logic around a deterministic checklist; fixed the two critical test-harness scoring bugs (list matching and numeric formatting); made all four agents' failure paths retryable instead of fatal. `CURRENT_SCORES.md` created as the first verified score table.
 8. **2026-09-29, first debug-loop pass — target: 0.8.** The 4 newly-onboarded domains brought online; `warehouse_package_inspection_sop` (0.60→0.95) and `know_your_business_sop` (0.60→0.80) fixed; `content_flagging_sop`/`video_classification_sop` confirmed as structural dead ends at 0.00.
-9. **2026-09-29, second debug-loop pass — target raised to 0.95.** `dangerous_goods_sop` (0.90→1.00), `warehouse_package_inspection_sop` (0.95→1.00), and `video_annotation_sop` (0.83→0.99) fixed; `customer_service_sop` regenerated once more and reproduced the same confirmed bug for a 4th time; the other three below-bar domains re-verified unchanged. This is the current state of the project.
+9. **2026-09-29, second debug-loop pass — target raised to 0.95.** `dangerous_goods_sop` (0.90→1.00), `warehouse_package_inspection_sop` (0.95→1.00), and `video_annotation_sop` (0.83→0.99) fixed; `customer_service_sop` regenerated once more and reproduced the same confirmed bug for a 4th time; the other three below-bar domains re-verified unchanged. This is the state of the project as of the second pass.
+10. **2026-10-03 — Video classification fixture fix and regeneration.** `validateVideo` in `video_classification_sop/tools.py` now returns an empty string for a blank `format` or `resolution`, so the generated code takes the SOP's non-compliant branch instead of crashing on NaN. Zero-cost re-score rose from 0.93 to 0.95 before any regeneration.
+11. **2026-10-03 to 2026-10-04 — Generic rules, guardrail, and debug passes.** Added codegen rules 27 (coerce blank cells before string methods) and 28 (implement every SOP-listed phrasing); added the schema output guardrail for required tool parameters with no source; added the `sop-debugger` toolspec gate with mandatory output schemas. A first full regeneration pass was followed by a second pass that was stopped partway, with aircraft and patient_intake at 0.00. A later single pass across the nine in-scope domains added the missing output schemas and matching `tools.py` return shapes, and its results are the Current scores table above. Committed on `main` and pushed. The `eval_sops/` fixtures remain untracked by design.
+
+## State as of 2026-10-04
+
+- **What changed in code.** `schema_agent.py` gained the required-parameter guardrail. `codegeneration_agent.py` gained rules 27 and 28. `planner_agent.py` had a misleading `{response}` log line replaced. `.claude/agents/sop-debugger.md` gained the toolspec gate, the mandatory-output-schema rule, the schema-depth rule, and three generic failure patterns.
+- **What changed in fixtures (not in git).** Output schemas were added to patient_intake (6 tools), aircraft (7 tools), and video_classification (10 tools). Patient and aircraft `tools.py` now return dicts that match their documented outputs. The know_your_business SOP section 4.1 field names were renamed to match the CSV columns. The know_your_business test labels were edited (16 rows, see Open issues). The warehouse `problems_breakdown` schema uses a dynamic map.
+- **Regression checks.** The schema guardrail fired on patient_intake (`patient_id`) and dangerous_goods (`sds_label_text`). Both retries succeeded, and the patient domain scored 1.00 after the toolspec and `tools.py` output fixes.
+
+## Open issues as of 2026-10-04
+
+These are the decisions and defects still open. Each is recorded so it can be decided one case at a time.
+
+- **video\_classification\_sop, 8 failures.**
+  - 4 Bullying-only escalations: the workflow returns the SOP default `["Remove", "Warning"]`, and the labels say `["Remove", "Strike Issued"]`. SOP 5.6.2 calls Strike a moderator judgment that isn't in the data, so this is label noise by the SOP's own description.
+  - 1 RAW-format row with Bullying at 0.92: the SOP stops technical failures early with `escalated=False`, but the label says escalated with Strike. The label contradicts the SOP.
+  - 1 blank-format row: the SOP says non-compliant, so Remove; the label says Allow. The label contradicts the SOP.
+  - 1 "m p4" row at 1280×720 with no categories: the SOP gives Allow; the label says Remove. No separating column found.
+  - 1 mp4 row at 0.62 Bullying confidence: below the 0.70 threshold, so not escalated; the label says Warning, and no SOP rule gives Warning for this case.
+- **email\_intent\_sop, 13 failures.**
+  - 8 listing-concern emails classed as "generic question", for example "Why isn't P12H3I listed yet?". The SOP lists these as concern (a). The classifier misses them because its phrase list doesn't match an identifier between words. This is a pipeline gap that codegen rule 28 is meant to address and doesn't reliably address.
+  - 5 "Multiple records found" errors: one product ID maps to several unrelated products in the backing data, so no generic rule can pick the right record. This is a fixture defect.
+  - The inventory tool's forecast path reads two columns, `projected_stock` and `restock_recommendation`, that aren't in the CSV. The default path doesn't call it, so scores are unaffected.
+- **know\_your\_business\_sop.** The 16 edited labels (escalate → awaiting information) are a user-approved change. Scores on the original labels are 0.80. Separately, SOP section 5.1.1 is ambiguous: a missing website, address, or email may or may not be an "irregularity" that triggers awaiting information. Pass 1 scored 0.56 under one reading, and later passes scored 0.98 under the edited labels, so this domain is sensitive to sampling. Neither the labels nor the wording has been decided.
+- **Stub documentation.** The 10 video_classification tools that return fixed values now have output schemas describing those fixed values. This conflicts with the earlier rule not to document stubs. The `sop-debugger` rule now requires a schema for every tool and marks stubs in their description, but the decision on whether this is right is open.
+- **Regression risk.** Codegen rules 27 and 28 are shared by every domain. Only parse checks and the regeneration passes above exercised them, so a regression in an unlisted domain is not ruled out.
+- **Repository state.** The `eval_sops/` fixtures are gitignored and not committed. They hold the SOP text, toolspecs, `tools.py`, and test data that the current scores depend on.
+
+## Orchestrator escalation (implemented 2026-10-01)
 
 ## Known gaps in this record
 
